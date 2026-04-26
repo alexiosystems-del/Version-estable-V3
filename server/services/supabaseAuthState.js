@@ -1,11 +1,9 @@
-const { proto } = require('@whiskeysockets/baileys');
-const { BufferJSON, initAuthCreds } = require('@whiskeysockets/baileys');
-
 /**
  * Custom Auth Adapter for Supabase
  * Stores WhatsApp session keys in a 'whatsapp_sessions' table.
  */
 const useSupabaseAuthState = async (supabase) => {
+    const { proto, BufferJSON, initAuthCreds } = require('@whiskeysockets/baileys');
 
     // 1. Fetch existing creds
     const readData = async (type, id) => {

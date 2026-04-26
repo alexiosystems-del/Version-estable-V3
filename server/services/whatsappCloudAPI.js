@@ -6,50 +6,82 @@
 const axios = require('axios');
 
 class WhatsAppCloudAPI {
-    constructor() {
-        this.accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
-        this.phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-        this.apiVersion = process.env.WHATSAPP_API_VERSION || 'v18.0';
+    /**
+     * @param {Object} config
+     * @param {string} config.accessToken
+     * @param {string} config.phoneNumberId
+     * @param {string} [config.apiVersion]
+     * @param {string} [config.webhookVerifyToken]
+     */
+    constructor(config = {}) {
+        this.accessToken = config.accessToken;
+        this.phoneNumberId = config.phoneNumberId;
+        this.apiVersion = config.apiVersion || 'v18.0';
         this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
-        this.webhookVerifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+        this.webhookVerifyToken = config.webhookVerifyToken;
 
         if (!this.accessToken || !this.phoneNumberId) {
-            console.warn('⚠️ WhatsApp Cloud API credentials not configured');
-        } else {
-            console.log('✅ WhatsApp Cloud API initialized');
-            console.log(`   Phone Number ID: ${this.phoneNumberId}`);
+            console.warn(`⚠️ WhatsApp Cloud API [${this.phoneNumberId || 'unknown'}] credentials missing in config`);
         }
     }
 
     /**
-     * Send a text message
+     * Contract implementation for AdapterFactory
      */
-    async sendMessage(to, text) {
+    capabilities() {
+        return {
+            platform: 'whatsapp_cloud',
+            audio: true,
+            templates: true,
+            buttons: true
+        };
+    }
+
+    /**
+     * Send a message (text or media)
+     * Aligned with MessageAdapter interface
+     */
+    async sendMessage(to, text, options = {}) {
+        if (!this.accessToken || !this.phoneNumberId) throw new Error('Missing Cloud API credentials');
+        
+        const { mediaUrl, mediaType } = options;
+        
         try {
+            let payload = {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: to
+            };
+
+            if (mediaUrl) {
+                // Meta Cloud API uses different endpoints for media usually (upload first), 
+                // but some implementations allow URLs for certain types or use a proxy.
+                // For this SaaS, we currently send text only for Cloud API in the main flow, 
+                // but we can add native media support here.
+                payload.type = mediaType === 'image' ? 'image' : mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'audio' : 'document';
+                payload[payload.type] = { link: mediaUrl };
+                if (text && mediaType !== 'audio') payload[payload.type].caption = text;
+            } else {
+                payload.type = 'text';
+                payload.text = { body: text };
+            }
+
             const response = await axios.post(
                 `${this.baseUrl}/${this.phoneNumberId}/messages`,
-                {
-                    messaging_product: 'whatsapp',
-                    recipient_type: 'individual',
-                    to: to,
-                    type: 'text',
-                    text: { body: text }
-                },
+                payload,
                 {
                     headers: {
                         'Authorization': `Bearer ${this.accessToken}`,
                         'Content-Type': 'application/json'
                     },
-                    timeout: 20000 // 20s timeout
+                    timeout: 20000 
                 }
             );
 
-            console.log(`✅ Message sent to ${to}`);
             return response.data;
         } catch (error) {
-            // Simplified logging to avoid massive console spam
             const errorMsg = error.response?.data || error.message;
-            console.error('❌ WhatsApp API Error:', JSON.stringify(errorMsg, null, 2));
+            console.error('❌ WhatsApp Cloud API Error:', JSON.stringify(errorMsg, null, 2));
             throw error;
         }
     }
@@ -77,76 +109,9 @@ class WhatsAppCloudAPI {
                     }
                 }
             );
-
-            console.log(`✅ Template sent to ${to}`);
             return response.data;
         } catch (error) {
             console.error('❌ Error sending template:', error.response?.data || error.message);
-            throw error;
-        }
-    }
-
-    /**
-     * Mark message as read
-     */
-    async markAsRead(messageId) {
-        try {
-            await axios.post(
-                `${this.baseUrl}/${this.phoneNumberId}/messages`,
-                {
-                    messaging_product: 'whatsapp',
-                    status: 'read',
-                    message_id: messageId
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${this.accessToken}`,
-                        'Content-Type': 'application/json'
-                    }
-                }
-            );
-            console.log(`✅ Message ${messageId} marked as read`);
-        } catch (error) {
-            console.error('❌ Error marking as read:', error.response?.data || error.message);
-        }
-    }
-
-    async getMediaUrl(mediaId) {
-        try {
-            const response = await axios.get(
-                `${this.baseUrl}/${mediaId}`,
-                {
-                    headers: { 'Authorization': `Bearer ${this.accessToken}` }
-                }
-            );
-            return response.data.url;
-        } catch (error) {
-            console.error('❌ Error getting media URL:', error.response?.data || error.message);
-            throw error;
-        }
-    }
-
-    async uploadMedia(buffer, mimeType) {
-        try {
-            const FormData = require('form-data');
-            const form = new FormData();
-            form.append('file', buffer, { filename: 'audio.mp3', contentType: mimeType });
-            form.append('type', 'audio/mpeg');
-            form.append('messaging_product', 'whatsapp');
-
-            const response = await axios.post(
-                `${this.baseUrl}/${this.phoneNumberId}/media`,
-                form,
-                {
-                    headers: {
-                        'Authorization': `Bearer ${this.accessToken}`,
-                        ...form.getHeaders()
-                    }
-                }
-            );
-            return response.data.id;
-        } catch (error) {
-            console.error('❌ Error uploading media:', error.response?.data || error.message);
             throw error;
         }
     }
@@ -169,7 +134,6 @@ class WhatsAppCloudAPI {
                     }
                 }
             );
-            console.log(`✅ Audio sent to ${to}`);
         } catch (error) {
             console.error('❌ Error sending audio:', error.response?.data || error.message);
             throw error;
@@ -177,72 +141,13 @@ class WhatsAppCloudAPI {
     }
 
     /**
-     * Process incoming webhook message
-     */
-    async processWebhook(body) {
-        try {
-            // Extract message data from webhook
-            const entry = body.entry?.[0];
-            const changes = entry?.changes?.[0];
-            const value = changes?.value;
-            const messages = value?.messages;
-
-            if (!messages || messages.length === 0) {
-                console.log('ℹ️ No messages in webhook');
-                return null;
-            }
-
-            const message = messages[0];
-            const from = message.from;
-            const messageId = message.id;
-            const messageType = message.type;
-
-            let text = null;
-            let audio = null;
-            let document = null;
-
-            if (message.type === 'text') {
-                text = message.text?.body;
-            } else if (message.type === 'audio') {
-                audio = message.audio;
-            } else if (message.type === 'document') {
-                document = message.document;
-            }
-
-            console.log(`📨 Received ${message.type} from ${from}`);
-
-            // Mark as read
-            await this.markAsRead(messageId);
-
-            return {
-                from,
-                messageId,
-                text,
-                audio, // { id, mime_type }
-                document, // { id, mime_type, filename, sha256 }
-                type: message.type,
-                timestamp: message.timestamp,
-                name: value.contacts?.[0]?.profile?.name
-            };
-        } catch (error) {
-            console.error('❌ Error processing webhook:', error);
-            return null;
-        }
-    }
-
-    // ... verification methods ...
-
-    /**
      * Verify webhook (for Meta setup)
      */
     verifyWebhook(mode, token, challenge) {
         if (mode === 'subscribe' && token === this.webhookVerifyToken) {
-            console.log('✅ Webhook verified');
             return challenge;
-        } else {
-            console.error('❌ Webhook verification failed');
-            return null;
         }
+        return null;
     }
 
     /**
@@ -257,4 +162,5 @@ class WhatsAppCloudAPI {
     }
 }
 
-module.exports = new WhatsAppCloudAPI();
+// Export the class itself
+module.exports = WhatsAppCloudAPI;

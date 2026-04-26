@@ -1,23 +1,25 @@
-const baileys = require('@whiskeysockets/baileys');
-const { makeWASocket, DisconnectReason, downloadMediaMessage } = baileys;
 const useSupabaseAuthState = require('./useSupabaseAuthState');
-const fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion || null;
-const Browsers = baileys.Browsers || null;
 const QRCode = require('qrcode');
-const crypto = require('crypto');
 const fs = require('fs');
 const pino = require('pino');
+
+// Polyfill for global crypto (Required for Baileys on some Node envs like older Node 18/20)
+if (!global.crypto) {
+    global.crypto = require('crypto');
+}
 const express = require('express');
 const router = express.Router();
 const alexBrain = require('./alexBrain');
-const { supabase, isSupabaseEnabled } = require('./supabaseClient');
+const { supabase, supabaseAdmin, isSupabaseEnabled } = require('./supabaseClient');
 const hubspotService = require('./hubspotService');
 const copperService = require('./copperService');
 const ragService = require('./ragService');
 const multer = require('multer');
-const pdfParse = require('pdf-parse');
+const { extractTextFromPDF } = require('./pdfService');
 const upload = multer({ storage: multer.memoryStorage() });
-const { recordWhatsappMessage } = require('./observability');
+const { encrypt, decrypt } = require('../utils/encryptionHelper');
+const { trackEvent } = require('./observability');
+const { redis, isRedisEnabled, acquireLock, releaseLock } = require('./redisService');
 
 const {
     savePromptVersion,
@@ -34,16 +36,44 @@ const sessionStatus = new Map();
 const reconnectAttempts = new Map();
 const conversationMemory = new Map(); // key: instanceId_remoteJid
 const pausedLeads = new Map(); // key: instanceId_remoteJid
+const operationalState = require('./operationalState');
 const sessionsDir = './sessions';
 const sessionsTable = process.env.WHATSAPP_SESSIONS_TABLE || 'whatsapp_sessions';
 const usageTable = 'tenant_usage_metrics';
+const whatsappSockets = new Map(); // Shared map for Baileys sockets
+const connectionStates = new Map(); // State machine: 'idle', 'connecting', 'online', 'failed'
 const maxReconnectAttempts = Number(process.env.WHATSAPP_MAX_RECONNECT_ATTEMPTS || 5);
 
 // --- EVENT LOG SYSTEM (ring buffer per bot, max 100 events) ---
 const botEventLogs = new Map(); // key: instanceId, value: Array<{timestamp, level, message, meta}>
 const botAiUsage = new Map();   // key: instanceId, value: { gemini: {count, tokens}, openai: {count, tokens}, deepseek: {count, tokens} }
 const BOT_LOG_MAX = 100;
+const SALES_INTENT_TERMS = [
+    'comprar', 'precio', 'costo', 'cotizacion', 'cotizar', 'presupuesto', 'pagar', 'pago', 'tarjeta',
+    'plan', 'suscripcion', 'agendar', 'cita', 'quiero', 'info', 'contacto', 'demo', 'contratar'
+];
+const SUPPORT_INTENT_TERMS = [
+    'ayuda', 'soporte', 'problema', 'error', 'falla', 'no funciona', 'asesor', 'reclamo',
+    'devolucion', 'reembolso', 'incidente'
+];
 
+const normalizeIntentText = (text = '') => String(text)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const hasIntentTerm = (normalizedText, terms = []) => terms.some(term => normalizedText.includes(term));
+
+const classifyInboundIntent = (text = '') => {
+    const normalized = normalizeIntentText(text);
+    if (!normalized) return 'otros';
+    if (hasIntentTerm(normalized, SALES_INTENT_TERMS)) return 'ventas';
+    if (hasIntentTerm(normalized, SUPPORT_INTENT_TERMS)) return 'soporte';
+    return 'otros';
+};
 // Persist critical events to Supabase (fire-and-forget, non-blocking)
 const persistBotEvent = async (instanceId, level, message, meta) => {
     if (!isSupabaseEnabled) return;
@@ -55,7 +85,10 @@ const persistBotEvent = async (instanceId, level, message, meta) => {
             meta: JSON.stringify(meta),
             created_at: new Date().toISOString()
         });
-    } catch (e) { /* silent — don't break bot flow for logging */ }
+    } catch (e) { 
+        // Silently ignore invalid URL or missing table errors for logging
+        if (e.message?.includes('Invalid URL')) return;
+    }
 };
 
 const logBotEvent = (instanceId, level, message, meta = {}) => {
@@ -144,6 +177,8 @@ const updateSessionStatus = async (instanceId, status, extra = {}) => {
         qr_code: extra.qr_code ?? null,
         company_name: extra.companyName ?? null,
         provider: extra.provider ?? null,
+        credentials_encrypted: extra.credentials_encrypted ?? null,
+        external_mapping_key: extra.external_mapping_key ?? null,
         updated_at: new Date().toISOString()
     };
 
@@ -152,7 +187,8 @@ const updateSessionStatus = async (instanceId, status, extra = {}) => {
         qr_code: payload.qr_code,
         updatedAt: payload.updated_at,
         companyName: payload.company_name,
-        provider: payload.provider
+        provider: payload.provider,
+        credentials_encrypted: payload.credentials_encrypted
     });
 
     if (!isSupabaseEnabled) return;
@@ -202,7 +238,9 @@ const hydrateSessionStatus = async () => {
                 qr_code: row.qr_code,
                 updatedAt: row.updated_at,
                 companyName: row.company_name,
-                provider: null
+                provider: null,
+                tenantId: row.tenant_id,
+                ownerEmail: row.owner_email
             });
 
             // Also hydrate clientConfigs so tenant filtering works in /status
@@ -231,8 +269,32 @@ const clearSessionRuntime = (instanceId) => {
 const safeDeletePersistentSession = async (instanceId) => {
     if (!isSupabaseEnabled) return;
 
-    const { error } = await supabase.from(sessionsTable).delete().eq('instance_id', instanceId);
+    const db = supabaseAdmin || supabase;
+    const { error } = await db.from(sessionsTable).delete().eq('instance_id', instanceId);
     if (error) console.warn(`⚠️ Failed deleting ${instanceId} from Supabase:`, error.message);
+};
+
+const purgeBotData = async (instanceId) => {
+    if (!isSupabaseEnabled) return;
+
+    const db = supabaseAdmin || supabase;
+    const cleanupTargets = [
+        { table: 'document_chunks', column: 'instance_id' },
+        { table: 'messages', column: 'instance_id' },
+        { table: 'bot_events', column: 'instance_id' },
+        { table: 'bot_ai_usage', column: 'instance_id' }
+    ];
+
+    for (const target of cleanupTargets) {
+        try {
+            const { error } = await db.from(target.table).delete().eq(target.column, instanceId);
+            if (error) {
+                console.warn(`⚠️ Failed deleting ${instanceId} from ${target.table}:`, error.message);
+            }
+        } catch (error) {
+            console.warn(`⚠️ Unexpected cleanup error in ${target.table} for ${instanceId}:`, error.message);
+        }
+    }
 };
 
 hydrateSessionStatus().catch((error) => {
@@ -241,9 +303,12 @@ hydrateSessionStatus().catch((error) => {
 
 const isOwnerTenant = (req, instanceId) => {
     const tenantId = req.tenant?.id;
-    const info = sessionStatus.get(instanceId);
-    if (!tenantId || !info) return false;
-    return info.tenantId === tenantId;
+    const configTenant = clientConfigs.get(instanceId)?.tenantId;
+    const statusTenant = sessionStatus.get(instanceId)?.tenantId;
+    const ownerId = configTenant || statusTenant;
+
+    if (!tenantId || !ownerId) return false;
+    return ownerId === tenantId;
 };
 
 const forbidIfNotOwner = (req, res, instanceId) => {
@@ -256,6 +321,7 @@ const forbidIfNotOwner = (req, res, instanceId) => {
 
 // --- HANDLER: QR MODE (Baileys) ---
 async function handleQRMessage(sock, msg, instanceId) {
+    const { downloadMediaMessage } = require('@whiskeysockets/baileys');
     const waProcessingStart = Date.now();
     if (!msg.message || msg.key.fromMe) return;
 
@@ -356,16 +422,16 @@ async function handleQRMessage(sock, msg, instanceId) {
             try {
                 const { data: dbHistory } = await supabase
                     .from('messages')
-                    .select('direction, content')
+                    .select('direction, content, content_original')
                     .eq('instance_id', instanceId)
                     .eq('remote_jid', remoteJid)
                     .order('created_at', { ascending: false })
-                    .limit(10);
+                    .limit(80);
 
                 if (dbHistory && dbHistory.length > 0) {
                     history = dbHistory.reverse().map(row => ({
                         role: row.direction === 'INBOUND' ? 'user' : 'assistant',
-                        content: row.content
+                        content: row.content_original || row.content
                     }));
                 }
             } catch (err) {
@@ -376,9 +442,10 @@ async function handleQRMessage(sock, msg, instanceId) {
             history = conversationMemory.get(memKey) || [];
         }
 
-        history.push({ role: 'user', content: processedText });
+        // Add original text to history for AI context
+        history.push({ role: 'user', content: text });
         // Although we limit to 10 DB, memory fallback can keep up to 20
-        if (history.length > 20) history = history.slice(-20);
+        if (history.length > 100) history = history.slice(-100);
 
         // --- Check if Human manually paused this lead ---
         if (pausedLeads.get(memKey)) {
@@ -387,11 +454,11 @@ async function handleQRMessage(sock, msg, instanceId) {
         }
 
         const result = await alexBrain.generateResponse({
-            message: processedText,
+            message: text,   // PASS ORIGINAL TEXT TO AI (Detects language)
             history: history,
             botConfig: {
                 bot_name: config.companyName,
-                system_prompt: config.customPrompt || 'Eres ALEX IO, asistente virtual inteligente.',
+                system_prompt: (config.customPrompt || 'Eres ALEX IO, asistente virtual inteligente.') + "\nRespond in the user's language.",
                 voice: config.voice,
                 tenantId: config.tenantId,
                 instanceId: instanceId
@@ -413,9 +480,14 @@ async function handleQRMessage(sock, msg, instanceId) {
         }
 
         // --- Lead Extraction & Webhooks (Background) ---
-        const lowerText = processedText.toLowerCase();
-        const intentTriggers = /(comprar|precio|costo|agendar|cita|quiero|info|contacto|hablar|humano|mail|correo|arroba)/;
-        const shouldExtract = lowerText.match(intentTriggers) || (history.filter(h => h.role === 'user').length % 4 === 0);
+        const normalizedText = normalizeIntentText(processedText);
+        const shouldExtract = hasIntentTerm(normalizedText, SALES_INTENT_TERMS)
+            || normalizedText.includes('hablar')
+            || normalizedText.includes('humano')
+            || normalizedText.includes('mail')
+            || normalizedText.includes('correo')
+            || normalizedText.includes('arroba')
+            || (history.filter(h => h.role === 'user').length % 4 === 0);
 
         if (shouldExtract) {
             alexBrain.extractLeadInfo({ history, systemPrompt: config.customPrompt })
@@ -499,8 +571,12 @@ async function handleQRMessage(sock, msg, instanceId) {
             }
 
             if (tenantId && isSupabaseEnabled) {
+                // Translate AI response for human agent if needed
+                const aiTranslation = await alexBrain.translateIncomingMessage(result.text, 'es');
+                const uiContent = aiTranslation.translated || result.text;
+
                 // Log outbound message and run Shadow Audit
-                const msgContent = result.audioBuffer ? `[AUDIO] ${result.text}` : result.text;
+                const msgContent = result.audioBuffer ? `[AUDIO] ${uiContent}` : uiContent;
 
                 supabase.from('messages').insert({
                     instance_id: instanceId,
@@ -508,7 +584,8 @@ async function handleQRMessage(sock, msg, instanceId) {
                     remote_jid: remoteJid,
                     direction: 'OUTBOUND',
                     message_type: result.audioBuffer ? 'audio' : 'text',
-                    content: msgContent
+                    content: msgContent,
+                    content_original: result.text
                 }).select().then(({ data, error }) => {
                     if (!error && data && data.length > 0) {
                         const messageId = data[0].id;
@@ -544,179 +621,222 @@ async function handleQRMessage(sock, msg, instanceId) {
             }
         }
 
+        // Resolve adapter from instanceId (instead of direct sock)
+        const adapter = activeSessions.get(instanceId);
+        if (!adapter) {
+            console.warn(`⚠️ [${instanceId}] No adapter found for background response.`);
+            return;
+        }
+
         // Send voice note if audio was generated
         if (result.audioBuffer) {
             try {
                 // Delay slightly 
                 await new Promise(resolve => setTimeout(resolve, 500));
 
-                const sentAudio = await sock.sendMessage(remoteJid, {
-                    audio: result.audioBuffer,
-                    mimetype: 'audio/ogg; codecs=opus', // Reverted to safer ogg
-                    ptt: true // Send as voice note (push-to-talk style)
-                });
-                console.log(`🔊 [${config.companyName}] Audio enviado con éxito a: ${remoteJid} (ID: ${sentAudio?.key?.id})`);
+                if (typeof adapter.sendVoiceNote === 'function') {
+                    await adapter.sendVoiceNote(remoteJid, result.audioBuffer);
+                    console.log(`🔊 [${config.companyName}] Audio enviado con éxito a: ${remoteJid}`);
+                } else {
+                    // Fallback to text if adapter doesn't support audio
+                    await adapter.sendMessage(remoteJid, result.text);
+                }
             } catch (audioErr) {
                 console.warn(`⚠️ [${config.companyName}] No se pudo enviar audio:`, audioErr.message);
-                // Fallback: send text if audio fails to send
-                await sock.sendMessage(remoteJid, { text: result.text });
+                await adapter.sendMessage(remoteJid, result.text);
             }
+        } else {
+            // Send text response
+            await adapter.sendMessage(remoteJid, result.text);
         }
-        recordWhatsappMessage({ latencyMs: Date.now() - waProcessingStart, ok: true });
+        trackEvent({ instance_id: instanceId, channel: 'whatsapp', status: 'success', latency_ms: Date.now() - waProcessingStart, error_message: null });
     } catch (err) {
-        recordWhatsappMessage({ latencyMs: Date.now() - waProcessingStart, ok: false });
+        trackEvent({ instance_id: instanceId, channel: 'whatsapp', status: 'error', latency_ms: Date.now() - waProcessingStart, error_message: err.message });
         console.error(`❌ [${instanceId}] Error handling message:`, err.message);
     }
 }
 
-// --- CONNECT FUNCTION ---
-async function connectToWhatsApp(instanceId, config, res = null) {
-    clientConfigs.set(instanceId, config);
-
-    let state, saveCreds, clearState;
-
-    if (isSupabaseEnabled) {
-        // Render Ephemeral storage fix: Use Supabase backend for persistent sessions
-        const authStore = await useSupabaseAuthState(instanceId, supabase);
-        state = authStore.state;
-        saveCreds = authStore.saveCreds;
-        clearState = authStore.clearState;
-    } else {
-        // Fallback backward compat if someone turns off Supabase
-        const { useMultiFileAuthState } = baileys;
-        const sessionPath = `${sessionsDir}/${instanceId}`;
-        const localAuth = await useMultiFileAuthState(sessionPath);
-        state = localAuth.state;
-        saveCreds = localAuth.saveCreds;
-        clearState = () => fs.rmSync(sessionPath, { recursive: true, force: true });
+/**
+ * Unified connection engine for ALL channels (WhatsApp, Discord, TikTok, etc.)
+ */
+const startBotInstance = async (instanceId, config, res = null) => {
+    const provider = (config.provider || 'baileys').toLowerCase();
+    
+    // Baileys requires a special flow for QR generation
+    if (provider === 'baileys') {
+        return connectToWhatsApp(instanceId, config, res);
     }
 
-    // Fetch latest WhatsApp Web version to avoid 405 errors
-    let version;
+    // For Cloud/Bot providers (Discord, Meta, TikTok, etc.)
     try {
-        const versionInfo = await fetchLatestBaileysVersion();
-        version = versionInfo.version;
-        console.log(`📡 [${instanceId}] Using WA Web version: ${version.join('.')}`);
-    } catch (e) {
-        console.warn(`⚠️ [${instanceId}] Could not fetch latest version, using default`);
-        version = undefined; // Let Baileys use its built-in default
-    }
+        const { getAdapter } = require('./adapterFactory');
+        
+        const hooks = {
+            trackEvent
+        };
 
-    const sock = makeWASocket({
-        auth: state,
-        version,
-        printQRInTerminal: false,
-        logger: pino({ level: 'fatal' }),
-        browser: Browsers ? Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.0'],
-        connectTimeoutMs: 60000,
-        keepAliveIntervalMs: 10000,
-        getMessage: async (key) => {
-            // Needed to prevent Bad MAC crashes during decryption of media/audio
-            return {
-                conversation: 'Message decryption failed locally.'
-            };
-        }
-    });
+        const adapter = getAdapter(config, null, hooks);
+        if (!adapter) throw new Error(`Could not create adapter for ${provider}`);
 
-    const previous = activeSessions.get(instanceId);
-    if (previous && previous !== sock) {
-        try { previous.end?.(); } catch (_) { }
-    }
+        // Register in active sessions immediately
+        activeSessions.set(instanceId, adapter);
+        clientConfigs.set(instanceId, config);
 
-    activeSessions.set(instanceId, sock);
-    await updateSessionStatus(instanceId, 'connecting', { companyName: config.companyName });
-    console.log(`🔄 [${instanceId}] Connecting for ${config.companyName || 'ALEX IO'}...`);
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        const closeCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || null;
-
-        if (qr) {
-            QRCode.toDataURL(qr)
-                .then(async (url) => {
-                    await updateSessionStatus(instanceId, 'qr_ready', {
-                        companyName: config.companyName,
-                        qr_code: url
-                    });
-
-                    console.log(`📲 [${instanceId}] QR generated.`);
-
-                    if (res && !res.headersSent) {
-                        res.json({ success: true, qr_code: url, instance_id: instanceId });
-                    }
-                })
-                .catch((error) => {
-                    console.error(`❌ [${instanceId}] QR conversion failed:`, error.message);
-                });
-        }
-
-        if (connection === 'close') {
-            updateSessionStatus(instanceId, 'disconnected', {
+        // If adapter has persistent connection (like Discord), initialize it
+        if (typeof adapter.init === 'function') {
+            adapter.init().catch(err => {
+                console.error(`❌ [${instanceId}] Adapter init failed:`, err.message);
+            });
+        } else {
+            // Static adapters (just metadata-based or webhook-based)
+            updateSessionStatus(instanceId, 'online', {
                 companyName: config.companyName,
-                qr_code: null
-            }).catch(() => null);
+                provider
+            });
+        }
 
-            // Permanent errors that should NOT trigger reconnection (Excluded 401 because it can be temporary MD sync issue)
-            const FATAL_CODES = [403, 405, 406, 409, 410, 440];
-            const isFatal = FATAL_CODES.includes(closeCode);
-            const isLoggedOut = closeCode === DisconnectReason.loggedOut;
-            const shouldReconnect = !isFatal && !isLoggedOut;
-            const attempts = (reconnectAttempts.get(instanceId) || 0) + 1;
-            reconnectAttempts.set(instanceId, attempts);
+        if (res && !res.headersSent) {
+            res.json({
+                success: true,
+                instance_id: instanceId,
+                provider,
+                message: `Conector ${provider} inicializado correctamente.`
+            });
+        }
+    } catch (err) {
+        console.error(`❌ [${instanceId}] startBotInstance failed:`, err.message);
+        if (res && !res.headersSent) {
+            res.status(500).json({ error: `Error inicializando ${provider}: ${err.message}` });
+        }
+        throw err;
+    }
+};
 
-            console.log(`⚠️ [${instanceId}] Connection closed (code: ${closeCode ?? 'unknown'}). Fatal: ${isFatal}. Reconnect: ${shouldReconnect ? 'yes' : 'NO'} (attempt ${attempts}/${maxReconnectAttempts})`);
-            logBotEvent(instanceId, 'warn', `Conexión cerrada (code: ${closeCode ?? 'unknown'})`, { closeCode, fatal: isFatal, attempt: attempts });
+// --- CONNECT FUNCTION (Hardened V5 with Locking) ---
+async function connectToWhatsApp(instanceId, config, res = null) {
+    const currentState = connectionStates.get(instanceId);
+    if (currentState === 'connecting' || currentState === 'online') {
+        console.warn(`⚠️ [${instanceId}] Intento de conexión duplicado detectado (Estado: ${currentState}). Ignorando.`);
+        if (res && !res.headersSent) res.status(409).json({ error: 'Ya existe una conexión en curso para este bot.' });
+        return;
+    }
 
-            if (isFatal) {
-                console.error(`🛑 [${instanceId}] FATAL error ${closeCode} — stopping reconnection. Clearing auth state.`);
-                logBotEvent(instanceId, 'error', `Error FATAL (code: ${closeCode}) — reconexión detenida`, { closeCode });
-                // Clear corrupted auth state so next connect gets a fresh QR
-                if (clearState) clearState().catch(() => null);
+    // 1. Acquire Distributed Lock (SaaS Multi-instance safety)
+    const lockKey = `lock:wa:connect:${instanceId}`;
+    const hasLock = await acquireLock(lockKey, 90000); // 90s lock
+    if (!hasLock) {
+        console.warn(`⚠️ [${instanceId}] No se pudo obtener el lock de conexión. ¿Otro worker está conectando?`);
+        if (res && !res.headersSent) res.status(423).json({ error: 'Operación en curso por otro worker. Espera 60s.' });
+        return;
+    }
 
-                updateSessionStatus(instanceId, `fatal_error_${closeCode}`, {
-                    companyName: config.companyName,
-                    qr_code: null,
-                    error: `WhatsApp rechazó la conexión (código ${closeCode}). Reintenta desde el dashboard.`
-                }).catch(() => null);
+    try {
+        connectionStates.set(instanceId, 'connecting');
+        const { makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+        clientConfigs.set(instanceId, config);
 
-                if (res && !res.headersSent) {
-                    res.status(503).json({
-                        error: `WhatsApp rechazó la conexión (código ${closeCode}). Esto suele indicar un problema temporal de WhatsApp Web. Reintenta en unos minutos.`,
-                        instance_id: instanceId,
-                        close_code: closeCode
-                    });
-                }
+        let state, saveCreds, clearState;
 
-                clearSessionRuntime(instanceId);
-            } else if (shouldReconnect && attempts <= maxReconnectAttempts) {
-                // Exponential backoff: 5s, 10s, 20s, 40s, 60s max
-                const delay = Math.min(5000 * Math.pow(2, attempts - 1), 60000);
-                console.log(`🔁 [${instanceId}] Reconnecting in ${delay / 1000}s...`);
-                logBotEvent(instanceId, 'info', `Reconectando en ${delay / 1000}s (intento ${attempts}/${maxReconnectAttempts})`, { delay, attempt: attempts });
-                setTimeout(() => connectToWhatsApp(instanceId, config, null), delay);
-            } else {
-                updateSessionStatus(instanceId, 'failed_max_retries', {
+        if (isSupabaseEnabled) {
+            const authStore = await useSupabaseAuthState(instanceId, supabase);
+            state = authStore.state;
+            saveCreds = authStore.saveCreds;
+            clearState = authStore.clearState;
+        } else {
+            const sessionPath = `${sessionsDir}/${instanceId}`;
+            const localAuth = await useMultiFileAuthState(sessionPath);
+            state = localAuth.state;
+            saveCreds = localAuth.saveCreds;
+            clearState = () => fs.rmSync(sessionPath, { recursive: true, force: true });
+        }
+
+        let version;
+        try {
+            const versionInfo = await fetchLatestBaileysVersion();
+            version = versionInfo.version;
+        } catch (e) {
+            version = [2, 3000, 1015901307];
+        }
+
+        const sock = makeWASocket({
+            auth: state,
+            version,
+            printQRInTerminal: false,
+            logger: pino({ level: 'silent' }),
+            browser: ['Windows', 'Chrome', '20.0.04'],
+            connectTimeoutMs: 120000,
+            keepAliveIntervalMs: 30000,
+            maxMsgRetryCount: 5,
+        });
+
+        whatsappSockets.set(instanceId, sock);
+        const { BaileysAdapter } = require('./adapterFactory');
+        activeSessions.set(instanceId, new BaileysAdapter(instanceId, whatsappSockets));
+
+        await updateSessionStatus(instanceId, 'connecting', { companyName: config.companyName });
+        console.log(`🔄 [${instanceId}] Iniciando conexión para ${config.companyName || 'ALEX IO'}...`);
+
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            const closeCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || null;
+
+            if (qr) {
+                QRCode.toDataURL(qr)
+                    .then(async (url) => {
+                        await updateSessionStatus(instanceId, 'qr_ready', {
+                            companyName: config.companyName,
+                            qr_code: url
+                        });
+                        if (res && !res.headersSent) {
+                            res.json({ success: true, qr_code: url, instance_id: instanceId });
+                        }
+                    })
+                    .catch((error) => console.error(`❌ [${instanceId}] QR Error:`, error.message));
+            }
+
+            if (connection === 'close') {
+                connectionStates.set(instanceId, 'failed');
+                await releaseLock(lockKey); // Release lock on failure to allow retry
+                
+                updateSessionStatus(instanceId, 'disconnected', {
                     companyName: config.companyName,
                     qr_code: null
                 }).catch(() => null);
 
-                if (res && !res.headersSent) {
-                    res.status(503).json({
-                        error: `No se pudo establecer conexión con WhatsApp tras ${attempts} intentos.`,
-                        instance_id: instanceId,
-                        close_code: closeCode
-                    });
-                }
+                const FATAL_CODES = [403, 405, 406, 409, 410, 440];
+                const isFatal = FATAL_CODES.includes(closeCode);
+                const isLoggedOut = closeCode === DisconnectReason.loggedOut;
+                const shouldReconnect = !isFatal && !isLoggedOut;
+                const attempts = (reconnectAttempts.get(instanceId) || 0) + 1;
+                reconnectAttempts.set(instanceId, attempts);
 
-                clearSessionRuntime(instanceId);
-            }
-        } else if (connection === 'open') {
+                if (isFatal) {
+                    if (clearState) clearState().catch(() => null);
+                    updateSessionStatus(instanceId, `fatal_error_${closeCode}`, {
+                        companyName: config.companyName,
+                        qr_code: null,
+                        error: `Error fatal ${closeCode}. Reautentica.`
+                    }).catch(() => null);
+                    
+                    if (res && !res.headersSent) res.status(503).json({ error: `Error fatal ${closeCode}`, instance_id: instanceId });
+                    clearSessionRuntime(instanceId);
+                } else if (shouldReconnect && attempts <= maxReconnectAttempts) {
+                    const delay = Math.min(5000 * Math.pow(2, attempts - 1), 60000);
+                    console.log(`🔁 [${instanceId}] Reintentando en ${delay / 1000}s...`);
+                    setTimeout(() => {
+                        connectionStates.delete(instanceId); // Reset state for retry
+                        connectToWhatsApp(instanceId, config, null);
+                    }, delay);
+                } else {
+                    updateSessionStatus(instanceId, 'failed_max_retries', { companyName: config.companyName }).catch(() => null);
+                    if (res && !res.headersSent) res.status(503).json({ error: 'Máximo de reintentos alcanzado', instance_id: instanceId });
+                    clearSessionRuntime(instanceId);
+                }
+            } else if (connection === 'open') {
+            connectionStates.set(instanceId, 'online');
+            await releaseLock(lockKey); // Success! Release lock.
             reconnectAttempts.set(instanceId, 0);
-            logBotEvent(instanceId, 'info', '✅ Bot conectado exitosamente', { companyName: config.companyName });
-            updateSessionStatus(instanceId, 'online', {
-                companyName: config.companyName,
-                qr_code: null
-            }).catch(() => null);
+            updateSessionStatus(instanceId, 'online', { companyName: config.companyName, qr_code: null }).catch(() => null);
             console.log(`✅ [${instanceId}] ${config.companyName} ONLINE!`);
         }
     });
@@ -724,20 +844,33 @@ async function connectToWhatsApp(instanceId, config, res = null) {
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('messages.upsert', ({ messages }) => {
-        // Ejecución asíncrona concurrente de alto rendimiento
         messages.forEach(msg => {
             handleQRMessage(sock, msg, instanceId).catch(err => {
-                console.error(`❌ [${instanceId}] Async Message Error:`, err.message);
+                console.error(`❌ [${instanceId}] Message Error:`, err.message);
             });
         });
     });
 
     return sock;
+} catch (err) {
+    console.error(`❌ [${instanceId}] Critical connection crash:`, err.message);
+    await releaseLock(lockKey);
+    connectionStates.set(instanceId, 'failed');
+    throw err;
+}
 }
 
 // --- ENDPOINTS ---
 router.post('/connect', async (req, res) => {
-    const { companyName, customPrompt, voice, maxWords, maxMessages, hubspotAccessToken, copperApiKey, copperUserEmail, provider = 'baileys', metaApiUrl, metaPhoneNumberId, metaAccessToken, dialogApiKey } = req.body || {};
+    const { 
+        companyName, customPrompt, voice, maxWords, maxMessages, 
+        provider = 'baileys',
+        metaPhoneNumberId, metaAccessToken, metaVerifyToken,
+        tiktokAccessToken, discordToken,
+        redditClientId, redditClientSecret, redditUsername, redditPassword,
+        hubspotAccessToken, copperApiKey, copperUserEmail, ghlApiKey, 
+        dialogApiKey 
+    } = req.body || {};
     const cleanName = String(companyName || '').trim();
 
     if (!cleanName) {
@@ -745,24 +878,62 @@ router.post('/connect', async (req, res) => {
     }
 
     const instanceId = `alex_${Date.now()}`;
-    // Strictly use authenticated tenant ID for isolation
     const effectiveTenantId = req.tenant?.id;
+
+    // 1. Prepare credentials object for encryption
+    const credentials = {
+        metaPhoneNumberId,
+        metaAccessToken,
+        metaVerifyToken,
+        tiktokAccessToken,
+        discordToken,
+        redditClientId,
+        redditClientSecret,
+        redditUsername,
+        redditPassword,
+        hubspotAccessToken,
+        copperApiKey,
+        ghlApiKey,
+        dialogApiKey
+    };
+
+    // Filter out undefined/empty
+    const filteredCreds = {};
+    for (const [k, v] of Object.entries(credentials)) {
+        if (v) filteredCreds[k] = v;
+    }
+
+    // 2. Encrypt
+    const credentials_encrypted = Object.keys(filteredCreds).length > 0
+        ? filteredCreds // Will be JSONB-ified by Supabase client, but we should secure it.
+        : null;
+
+    // NOTE: For true production security, we encrypt each string inside the object before sending to JSONB
+    const securedCreds = {};
+    if (credentials_encrypted) {
+        for (const [k, v] of Object.entries(credentials_encrypted)) {
+             securedCreds[k] = encrypt(String(v));
+        }
+    }
+
+    // 3. Resolve external mapping key
+    let external_mapping_key = null;
+    if (provider === 'meta' || provider === 'whatsapp_cloud') external_mapping_key = metaPhoneNumberId;
+    else if (provider === 'tiktok') external_mapping_key = req.body.tiktokSellerId || tiktokAccessToken;
+    else if (provider === 'discord') external_mapping_key = req.body.discordGuildId || discordToken;
+    else if (provider === 'reddit') external_mapping_key = redditUsername;
+
     const config = {
         companyName: cleanName,
         customPrompt,
         voice: voice || 'nova',
         maxWords: maxWords || 50,
         maxMessages: maxMessages || 10,
-        hubspotAccessToken: hubspotAccessToken || '',
-        copperApiKey: copperApiKey || '',
-        copperUserEmail: copperUserEmail || '',
         provider,
         tenantId: effectiveTenantId,
         ownerEmail: req.tenant?.email || '',
-        metaApiUrl,
-        metaPhoneNumberId,
-        metaAccessToken,
-        dialogApiKey
+        credentials: filteredCreds, // Plain for memory use
+        external_mapping_key
     };
 
     try {
@@ -771,6 +942,8 @@ router.post('/connect', async (req, res) => {
             await updateSessionStatus(instanceId, 'configured_cloud', {
                 companyName: cleanName,
                 provider,
+                credentials_encrypted: securedCreds,
+                external_mapping_key,
                 qr_code: null
             });
 
@@ -784,7 +957,7 @@ router.post('/connect', async (req, res) => {
             });
         }
 
-        await connectToWhatsApp(instanceId, config, res);
+        await startBotInstance(instanceId, config, res);
 
         const timeoutHandle = setTimeout(async () => {
             if (!res.headersSent) {
@@ -795,11 +968,11 @@ router.post('/connect', async (req, res) => {
                 });
 
                 res.status(408).json({
-                    error: 'Timeout waiting for QR. Aún estamos conectando con WhatsApp, intenta nuevamente en unos segundos.',
+                    error: 'Timeout waiting for QR. WhatsApp tardó mucho en responder, intenta nuevamente en unos segundos.',
                     instance_id: instanceId
                 });
             }
-        }, 90000);
+        }, 60000);
 
         res.on('close', () => clearTimeout(timeoutHandle));
         res.on('finish', () => clearTimeout(timeoutHandle));
@@ -839,6 +1012,7 @@ router.post('/disconnect', async (req, res) => {
     clientConfigs.delete(instanceId);
     sessionStatus.delete(instanceId);
     await safeDeletePersistentSession(instanceId);
+    await purgeBotData(instanceId);
 
     try { fs.rmSync(`./sessions/${instanceId}`, { recursive: true, force: true }); } catch (_) { }
 
@@ -868,15 +1042,163 @@ router.post('/config/:instanceId', async (req, res) => {
         maxMessages: maxMessages ?? current.maxMessages ?? 10
     };
 
+    // Security: Encrypt sensitive fields for database storage
+    const sensitiveFields = [
+        'accessToken', 'metaAccessToken', 'verifyToken', 'phoneNumberId', 'wabaId',
+        'manychatToken', 'tiktokAccessToken', 'discordToken',
+        'redditClientId', 'redditClientSecret', 'redditUsername', 'redditPassword',
+        'dialogApiKey', 'hubspotAccessToken', 'ghlApiKey', 'copperApiKey'
+    ];
+    
+    const credsToEncrypt = {};
+    sensitiveFields.forEach(field => {
+        if (nextConfig[field]) {
+            credsToEncrypt[field] = nextConfig[field];
+        }
+    });
+
+    const credentials_encrypted = Object.keys(credsToEncrypt).length > 0 
+        ? encrypt(JSON.stringify(credsToEncrypt)) 
+        : null;
+
     clientConfigs.set(instanceId, nextConfig);
 
     await updateSessionStatus(instanceId, 'configured', {
         companyName: nextConfig.companyName,
         provider: nextConfig.provider,
+        credentials_encrypted,
         qr_code: null
     });
 
     return res.json({ success: true, instance_id: instanceId, config: nextConfig });
+});
+
+/**
+ * Perform operational actions on a bot instance (Pause, Resume, Reconnect)
+ */
+/**
+ * Force-restart a bot instance (Clears session state and triggers new QR for Baileys)
+ */
+router.post('/instance/:instanceId/restart', async (req, res) => {
+    const { instanceId } = req.params;
+    if (forbidIfNotOwner(req, res, instanceId)) return;
+
+    try {
+        const config = clientConfigs.get(instanceId) || sessionStatus.get(instanceId);
+        if (!config) return res.status(404).json({ error: 'Instancia no encontrada.' });
+
+        console.log(`🔄 [${instanceId}] Restart requested from Dashboard. Clearing state...`);
+        logBotEvent(instanceId, 'connection', 'Restart manual solicitado (Limpieza de estado)');
+
+        // 1. Terminate existing socket cleanly
+        const existingSock = activeSessions.get(instanceId);
+        if (existingSock) {
+            try { existingSock.logout(); } catch (_) {}
+            try { existingSock.end?.(); } catch (_) {}
+            activeSessions.delete(instanceId);
+        }
+
+        // 2. Clear Adapter Cache (Cloud/Multi-channel compatibility)
+        const { clearAdapterCache } = require('./adapterFactory');
+        clearAdapterCache(instanceId);
+
+        // 3. Clear Auth State (Baileys specific)
+        if (isSupabaseEnabled) {
+            const authStore = await useSupabaseAuthState(instanceId, supabase);
+            if (authStore.clearState) await authStore.clearState();
+        } else {
+            const sessionPath = `${sessionsDir}/${instanceId}`;
+            if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+        }
+
+        // 4. Reset operation states
+        reconnectAttempts.set(instanceId, 0);
+        await updateSessionStatus(instanceId, 'connecting', { 
+            companyName: config.companyName,
+            provider: config.provider || 'baileys',
+            qr_code: null 
+        });
+
+        // 5. Re-trigger connection in background (frontend will poll /status)
+        connectToWhatsApp(instanceId, config).catch(e => {
+            console.error(`❌ [${instanceId}] Restart connection failed:`, e.message);
+        });
+
+        return res.json({ success: true, message: 'Instancia reiniciada. Generando nuevo QR...' });
+    } catch (error) {
+        console.error(`❌ [${instanceId}] Error en /restart:`, error);
+        return res.status(500).json({ error: error.message });
+    }
+});
+
+router.post('/action/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const { action } = req.body;
+    
+    if (forbidIfNotOwner(req, res, instanceId)) return;
+
+    try {
+        switch (action) {
+            case 'pause':
+                operationalState.pause(instanceId);
+                logBotEvent(instanceId, 'system', 'Bot paused by user/SRE');
+                break;
+            case 'resume':
+                operationalState.resume(instanceId);
+                logBotEvent(instanceId, 'system', 'Bot resumed by user/SRE');
+                break;
+            case 'reconnect':
+                // For Cloud/Social bots, clearing cache in AdapterFactory forces a new instance with fresh creds
+                const { clearAdapterCache } = require('./adapterFactory');
+                clearAdapterCache(instanceId);
+                
+                // For Baileys bots, trigger a manual connection attempt without deleting the folder
+                const config = clientConfigs.get(instanceId);
+                if (config && config.provider === 'baileys') {
+                    console.log(`📡 [${instanceId}] Manual soft-reconnect triggered from Dashboard`);
+                    connectToWhatsApp(instanceId, config, null).catch(e => {
+                        console.error(`❌ [${instanceId}] Soft-reconnect failed:`, e.message);
+                    });
+                }
+
+                logBotEvent(instanceId, 'system', 'Bot re-initialization triggered');
+                break;
+            default:
+                return res.status(400).json({ error: 'Invalid action' });
+        }
+
+        return res.json({ success: true, action, instance_id: instanceId });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Manual trigger for CRM Sync Test (SRE use)
+ */
+router.post('/test-sync/:instanceId', async (req, res) => {
+    const { instanceId } = req.params;
+    const { processLeadAsync } = require('./leadProcessor');
+    
+    if (forbidIfNotOwner(req, res, instanceId)) return;
+
+    try {
+        const mockMessageHistory = [
+            { role: 'user', content: 'Hola, estoy interesado en comprar el plan Enterprise. Mi nombre es Test User y mi correo es test@example.com' },
+            { role: 'assistant', content: '¡Excelente! Tenemos planes increíbles. ¿Te gustaría agendar una demo?' },
+            { role: 'user', content: 'Sí, agendemos para mañana.' }
+        ];
+
+        // Trigger asynchronous lead processing (IA Extraction + CRM Sync)
+        processLeadAsync(req.tenant?.id, instanceId, `TEST_CONTACT_${Date.now()}@s.whatsapp.net`, mockMessageHistory);
+
+        return res.json({ 
+            success: true, 
+            message: 'Sincronización de prueba iniciada. Revisa tu HubSpot en unos segundos.' 
+        });
+    } catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
 });
 
 // --- SOPORTE INTEGARDON AI ---
@@ -974,10 +1296,11 @@ router.post('/messages/send', async (req, res) => {
         const { instanceId, remoteJid, text } = req.body;
         if (!instanceId || !remoteJid || !text) return res.status(400).json({ error: 'Faltan parámetros' });
 
-        const sock = activeSessions.get(instanceId);
-        if (!sock) return res.status(404).json({ error: 'WhatsApp no está en línea' });
+        const adapter = activeSessions.get(instanceId);
+        if (!adapter) return res.status(404).json({ error: 'El bot no está en línea' });
 
-        await sock.sendMessage(remoteJid, { text });
+        // Standardized sendMessage call for all platforms (Baileys, Discord, Cloud)
+        await adapter.sendMessage(remoteJid, text);
 
         const config = clientConfigs.get(instanceId) || {};
         const tenantId = config.tenantId;
@@ -1014,6 +1337,11 @@ router.post('/instance/:instanceId/pause', (req, res) => {
     res.json({ success: true, instanceId, remoteJid, paused });
 });
 
+router.get('/health', (req, res) => {
+    const { getHealthSnapshot } = require('./observability');
+    res.json(getHealthSnapshot());
+});
+
 router.get('/status', async (req, res) => {
     const tenantId = req.tenant?.id;
     const isAdmin = req.tenant?.role === 'SUPERADMIN';
@@ -1021,6 +1349,7 @@ router.get('/status', async (req, res) => {
     let allSessions = Array.from(sessionStatus.entries()).map(([instanceId, info]) => ({
         instanceId,
         ...info,
+        paused: operationalState.isPaused(instanceId),
         tenantId: clientConfigs.get(instanceId)?.tenantId || info?.tenantId || null,
         ownerEmail: clientConfigs.get(instanceId)?.ownerEmail || info?.ownerEmail || null,
         provider: info.provider || clientConfigs.get(instanceId)?.provider || 'baileys'
@@ -1042,10 +1371,11 @@ router.get('/status', async (req, res) => {
             allSessions = (data || []).map(row => ({
                 instanceId: row.instance_id,
                 status: row.status,
+                paused: operationalState.isPaused(row.instance_id),
                 qr_code: row.qr_code,
                 updatedAt: row.updated_at,
                 companyName: row.company_name,
-                tenantId: row.tenant_id,
+                tenant_id: row.tenant_id,
                 ownerEmail: row.owner_email,
                 provider: 'baileys'
             }));
@@ -1115,8 +1445,7 @@ router.post('/knowledge/:instanceId/upload', upload.single('file'), async (req, 
         let textContent = '';
 
         if (originalName.toLowerCase().endsWith('.pdf')) {
-            const pdfData = await pdfParse(fileBuffer);
-            textContent = pdfData.text;
+            textContent = await extractTextFromPDF(fileBuffer);
         } else if (originalName.toLowerCase().endsWith('.txt')) {
             textContent = fileBuffer.toString('utf-8');
         } else {
@@ -1146,11 +1475,16 @@ router.post('/upload-media', upload.single('file'), async (req, res) => {
         const fileExt = file.originalname.split('.').pop();
         const fileName = `${tenantId}_${Date.now()}.${fileExt}`;
         const filePath = `broadcast/${fileName}`;
+        const storageClient = supabaseAdmin || supabase;
+
+        if (!storageClient) {
+            return res.status(500).json({ error: 'Supabase Storage no está configurado en el servidor.' });
+        }
 
         // Ensure 'media' bucket exists (fire-and-forget, non-blocking check)
-        supabase.storage.createBucket('media', { public: true }).catch(() => { });
+        storageClient.storage.createBucket('media', { public: true }).catch(() => { });
 
-        const { data, error } = await supabase.storage
+        const { data, error } = await storageClient.storage
             .from('media')
             .upload(filePath, file.buffer, {
                 contentType: file.mimetype,
@@ -1162,7 +1496,7 @@ router.post('/upload-media', upload.single('file'), async (req, res) => {
             return res.status(500).json({ error: `Error de almacenamiento: ${error.message}` });
         }
 
-        const { data: { publicUrl } } = supabase.storage
+        const { data: { publicUrl } } = storageClient.storage
             .from('media')
             .getPublicUrl(filePath);
 
@@ -1211,35 +1545,7 @@ router.get('/usage', async (req, res) => {
     }
 });
 
-router.post('/instance/:instanceId/restart', async (req, res) => {
-    try {
-        const { instanceId } = req.params;
-        const tenantId = req.tenant?.id;
-        const config = clientConfigs.get(instanceId);
-
-        if (!config && req.tenant?.role !== 'SUPERADMIN') {
-            return res.status(404).json({ error: 'Instancia no encontrada o permisos insuficientes' });
-        }
-
-        if (activeSessions.has(instanceId)) {
-            try { activeSessions.get(instanceId).logout(); } catch (_) { }
-        }
-
-        clearSessionRuntime(instanceId);
-        try { fs.rmSync(`${sessionsDir}/${instanceId}`, { recursive: true, force: true }); } catch (_) { }
-
-        await updateSessionStatus(instanceId, 'restarting', { companyName: config?.companyName || 'Reinicio' });
-
-        if (config && config.provider === 'baileys') {
-            setTimeout(() => connectToWhatsApp(instanceId, config, null), 1500);
-        }
-
-        return res.json({ success: true, message: 'La sesión se ha reiniciado correctamente.' });
-    } catch (error) {
-        console.error('❌ Error restarting session:', error.message);
-        return res.status(500).json({ error: 'Fallo al reiniciar conector' });
-    }
-});
+// Duplicate /restart route removed (already implemented above at L1027)
 
 router.get('/analytics/:instanceId', async (req, res) => {
     const { instanceId } = req.params;
@@ -1266,6 +1572,7 @@ router.get('/analytics/:instanceId', async (req, res) => {
         }
 
         const intent = { ventas: 0, soporte: 0, otros: 0 };
+        const channels = { whatsapp: 0, messenger: 0, instagram: 0, web: 0, tiktok: 0, otros: 0 };
 
         messages.forEach(msg => {
             const dateKey = msg.created_at.split('T')[0];
@@ -1273,21 +1580,27 @@ router.get('/analytics/:instanceId', async (req, res) => {
                 volumeMap[dateKey]++;
             }
 
+            // High-fidelity channel detection for Enterprise visibility
+            let channel = 'whatsapp';
+            const cText = msg.content || '';
+            if (cText.match(/\[messenger\]/i)) channel = 'messenger';
+            else if (cText.match(/\[instagram\]/i)) channel = 'instagram';
+            else if (cText.match(/\[web\]/i)) channel = 'web';
+            else if (cText.match(/\[tiktok\]/i)) channel = 'tiktok';
+            else if (cText.match(/\[discord\]/i)) channel = 'discord';
+            else if (cText.match(/\[manychat\]/i)) channel = 'manychat';
+
+            channels[channel] = (channels[channel] || 0) + 1;
+
             if (msg.direction === 'INBOUND') {
-                const text = String(msg.content || '').toLowerCase();
-                if (text.match(/(comprar|precio|costo|pagar|tarjeta|cotización)/)) {
-                    intent.ventas++;
-                } else if (text.match(/(ayuda|soporte|problema|error|falla|no funciona|asesor)/)) {
-                    intent.soporte++;
-                } else {
-                    intent.otros++;
-                }
+                const detectedIntent = classifyInboundIntent(msg.content || '');
+                intent[detectedIntent] = (intent[detectedIntent] || 0) + 1;
             }
         });
 
         const volume = Object.keys(volumeMap).map(date => ({ date, count: volumeMap[date] }));
 
-        res.json({ success: true, volume, intent });
+        res.json({ success: true, volume, intent, channels });
     } catch (err) {
         console.error('❌ Error fetching analytics:', err.message);
         res.status(500).json({ error: 'Error interno obteniendo analíticas' });
@@ -1299,9 +1612,24 @@ router.get('/superadmin/clients', async (req, res) => {
     if (!isSupabaseEnabled) return res.json({ clients: [] });
 
     try {
-        // Fetch users using admin api if service role available, else rely on a view or standard table (app_users fallback)
-        // Since app_users has plan and role, we pull them.
-        // Merge profiles and app_users to catch old and new users
+        // Load usage + bots snapshots first (avoid "usage is not defined" on partial environments)
+        let usageData = [];
+        let botsData = [];
+        try {
+            const { data: usageRows, error: usageErr } = await supabase
+                .from(usageTable)
+                .select('tenant_id, messages_sent, plan_limit, tokens_consumed');
+            if (!usageErr && Array.isArray(usageRows)) usageData = usageRows;
+        } catch (_) { }
+
+        try {
+            const { data: botRows, error: botErr } = await supabase
+                .from(sessionsTable)
+                .select('instance_id, tenant_id, owner_email, company_name, status, provider, updated_at');
+            if (!botErr && Array.isArray(botRows)) botsData = botRows;
+        } catch (_) { }
+
+        // Fetch users using multi-source resolution (app_users -> profiles -> sessions metadata)
         let mergedUsers = [];
         try {
             const { data: appUsers } = await supabase.from('app_users').select('id, email, plan, role');
@@ -1319,9 +1647,7 @@ router.get('/superadmin/clients', async (req, res) => {
             }
         } catch (_) { }
 
-        const usageData = usage || [];
-        const botsData = bots || [];
-
+        // Backfill from sessions if user not in tables (Legacy/Migration cases)
         if (botsData.length > 0) {
             botsData.forEach(b => {
                 const email = b.owner_email || b.tenant_id;
@@ -1334,9 +1660,11 @@ router.get('/superadmin/clients', async (req, res) => {
         const allUsers = mergedUsers.filter(u => u && u.email);
         const clients = allUsers.map(u => {
             const emailStr = String(u.email || '');
-            const tId = emailStr ? `tenant_${Buffer.from(emailStr).toString('base64').substring(0, 8)}` : (u.id || 'unknown');
+            // Generate a deterministic tenant handle if missing
+            const tId = u.id || (emailStr ? `tenant_${Buffer.from(emailStr).toString('base64').substring(0, 8)}` : 'unknown');
             const userUsage = usageData.find(us => us.tenant_id === tId || us.tenant_id === u.id) || { messages_sent: 0, plan_limit: 0, tokens_consumed: 0 };
             const userBots = botsData.filter(b => b.tenant_id === tId || b.tenant_id === u.id);
+            
             return {
                 id: u.id,
                 tenant_id: tId,
@@ -1357,7 +1685,7 @@ router.get('/superadmin/clients', async (req, res) => {
 
         return res.json({ success: true, clients });
     } catch (e) {
-        console.error('❌ Error superadmin endpoints:', e.message);
+        console.error('❌ Error superadmin clients list:', e.message);
         return res.status(500).json({ error: e.message });
     }
 });
@@ -1440,6 +1768,7 @@ router.post('/superadmin/bot-action', async (req, res) => {
             botEventLogs.delete(instanceId);
             botAiUsage.delete(instanceId);
             await safeDeletePersistentSession(instanceId);
+            await purgeBotData(instanceId);
             // Delete session folder
             const sessionPath = `${sessionsDir}/${instanceId}`;
             if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
@@ -1665,7 +1994,7 @@ NUEVO PROMPT:`;
         return res.json({ success: true, prompt: newPrompt });
     } catch (err) {
         console.error('❌ Error en Prompt Co-Pilot:', err.message);
-        return res.status(500).json({ error: 'Fallo al procesar la mejora del prompt' });
+        res.status(500).json({ error: 'Fallo al procesar la mejora del prompt' });
     }
 });
 
@@ -1717,7 +2046,7 @@ ${prompt}
         return res.json({ success: true, qa: parsed });
     } catch (err) {
         console.error('❌ Error en Prompt QA:', err.message);
-        return res.status(500).json({ error: 'Fallo al evaluar el prompt' });
+        res.status(500).json({ error: 'Fallo al evaluar el prompt' });
     }
 });
 
@@ -1787,10 +2116,77 @@ router.patch('/prompt-versions/:instanceId/:versionId/archive', async (req, res)
     }
 });
 
+// --- BROADCAST PREFLIGHT (VALIDACIÓN DE CAMPAÑA) ---
+router.post('/broadcast/preflight', async (req, res) => {
+    try {
+        const tenantId = req.tenant?.id;
+        if (!tenantId) return res.status(403).json({ error: 'Autorización requerida' });
+
+        const { instanceId, mediaUrl, mediaType } = req.body;
+        if (!instanceId) return res.status(400).json({ error: 'instanceId es requerido' });
+
+        // 1. Validar instancia y configuración
+        let config = clientConfigs.get(instanceId);
+        if (!config) {
+            const configPath = `${sessionsDir}/${instanceId}/config.json`;
+            if (fs.existsSync(configPath)) {
+                config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            } else {
+                return res.status(404).json({ valid: false, error: 'Bot no encontrado o no configurado.' });
+            }
+        }
+
+        // 2. Validar estado conectivo / permisos
+        if (config.provider === 'baileys') {
+            const sock = global.whatsappSessions?.get(instanceId);
+            if (!sock) return res.status(400).json({ valid: false, error: 'Conector Baileys desconectado.' });
+        } else if (config.provider === 'meta') {
+            if (!config.metaAccessToken || !config.metaPhoneNumberId) {
+                return res.status(400).json({ valid: false, error: 'Faltan credenciales de Meta Cloud API.' });
+            }
+        } else if (config.provider === '360dialog') {
+            if (!config.dialogApiKey) {
+                return res.status(400).json({ valid: false, error: 'Faltan credenciales de 360dialog.' });
+            }
+        }
+
+        // 3. Validar tipo de media
+        if (mediaUrl) {
+            const validTypes = ['image', 'video', 'audio', 'document'];
+            if (!validTypes.includes(mediaType)) {
+                return res.status(400).json({ valid: false, error: `mediaType inválido. Usa: ${validTypes.join(', ')}` });
+            }
+
+            // 4. Validar accesibilidad URL
+            try {
+                const headRes = await axios.head(mediaUrl, { timeout: 5000 });
+                if (headRes.status >= 400) {
+                    return res.status(400).json({ valid: false, error: `La URL multimedia retornó HTTP ${headRes.status}` });
+                }
+            } catch (mediaErr) {
+                // Si head falla por CORS u otro, intentar full GET ligero
+                try {
+                    await axios.get(mediaUrl, { method: 'GET', responseType: 'stream', timeout: 5000 });
+                } catch (getErr) {
+                    return res.status(400).json({ valid: false, error: 'No se puede acceder a la URL multimedia provista o está bloqueada.' });
+                }
+            }
+        }
+
+        return res.json({ valid: true, message: 'La configuración de la campaña es estable y pasable.' });
+    } catch (err) {
+        console.error('❌ Error en Broadcast Preflight:', err.message);
+        return res.status(500).json({ valid: false, error: 'Error interno validando la campaña.' });
+    }
+});
+// --- BROADCAST JOBS (in-memory tracking) ---
+const broadcastJobs = new Map(); // key: campaignId, value: { instanceId, tenantId, total, sent, failed, status, startedAt, finishedAt, errors[] }
+
 // --- BROADCAST (MARKETING / CAMPAÑAS MASIVAS) ---
 router.post('/broadcast', async (req, res) => {
     try {
         const tenantId = req.tenant?.id;
+        const tenantRole = req.tenant?.role;
         if (!tenantId) return res.status(403).json({ error: 'Autorización requerida' });
 
         const { instanceId, phones, message, mediaUrl, mediaType } = req.body;
@@ -1798,106 +2194,183 @@ router.post('/broadcast', async (req, res) => {
             return res.status(400).json({ error: 'instanceId, phones (array) y message son requeridos' });
         }
 
-        const sessionPath = `${sessionsDir}/${instanceId}`;
-        const configPath = `${sessionPath}/config.json`;
+        // Runtime-first config (works for active instances on Render without local config.json)
+        let config = clientConfigs.get(instanceId);
 
-        if (!fs.existsSync(configPath)) {
-            return res.status(404).json({ error: 'Instancia no encontrada o inactiva' });
+        // Fallback to DB metadata for persisted sessions
+        if (!config && isSupabaseEnabled) {
+            try {
+                const { data: session } = await supabase
+                    .from(sessionsTable)
+                    .select('instance_id, tenant_id, provider, company_name, meta_api_url, meta_phone_number_id, meta_access_token, dialog_api_key')
+                    .eq('instance_id', instanceId)
+                    .eq('tenant_id', tenantId)
+                    .single();
+
+                if (session) {
+                    config = {
+                        instanceId: session.instance_id,
+                        provider: session.provider || 'baileys',
+                        companyName: session.company_name || 'Bot',
+                        tenantId: session.tenant_id,
+                        metaApiUrl: session.meta_api_url,
+                        metaPhoneNumberId: session.meta_phone_number_id,
+                        metaAccessToken: session.meta_access_token,
+                        dialogApiKey: session.dialog_api_key
+                    };
+                }
+            } catch (_) { }
         }
 
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        if (!config) {
+            const configPath = `${sessionsDir}/${instanceId}/config.json`;
+            if (fs.existsSync(configPath)) {
+                config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            } else {
+                return res.status(404).json({ error: 'Instancia no encontrada o inactiva' });
+            }
+        }
 
-        // Asignar el envío asíncronamente en background
-        res.json({ success: true, message: `Iniciando broadcast a ${phones.length} números en segundo plano.`, queued: phones.length });
+        if (!config.instanceId) config.instanceId = instanceId;
+
+        // --- Validar ownership (tenant solo puede usar sus propios bots) ---
+        if (tenantRole !== 'SUPERADMIN' && config.tenantId && config.tenantId !== tenantId) {
+            return res.status(403).json({ error: 'No tenés permiso para enviar desde esta instancia.' });
+        }
+
+        // --- Validar cuota de mensajes del plan ---
+        if (isSupabaseEnabled) {
+            try {
+                const { data: usage } = await supabase
+                    .from(usageTable)
+                    .select('messages_sent, plan_limit')
+                    .eq('tenant_id', tenantId)
+                    .single();
+
+                if (usage && usage.plan_limit > 0) {
+                    const remaining = usage.plan_limit - (usage.messages_sent || 0);
+                    if (phones.length > remaining) {
+                        return res.status(429).json({
+                            error: `Cuota insuficiente. Disponibles: ${remaining} msgs, solicitados: ${phones.length}. Upgrade de plan requerido.`
+                        });
+                    }
+                }
+            } catch (_) { /* Usage table may not exist yet, skip quota check */ }
+        }
+
+        // --- Create campaign job for tracking ---
+        const campaignId = `bc_${instanceId}_${Date.now()}`;
+        const job = {
+            campaignId,
+            instanceId,
+            tenantId,
+            total: phones.length,
+            sent: 0,
+            failed: 0,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            finishedAt: null,
+            errors: []
+        };
+        broadcastJobs.set(campaignId, job);
+
+        // Respond immediately with campaign ID for status tracking
+        res.json({
+            success: true,
+            message: `Iniciando broadcast a ${phones.length} números en segundo plano.`,
+            queued: phones.length,
+            campaignId
+        });
 
         // Background Processor
         (async () => {
-            console.log(`📣 [BROADCAST] Iniciando campaña para ${instanceId} a ${phones.length} destinatarios...`);
-            let successCount = 0;
-            let failCount = 0;
+            console.log(`📣 [BROADCAST] Iniciando campaña ${campaignId} para ${instanceId} a ${phones.length} destinatarios...`);
+            const { getAdapter } = require('./adapterFactory');
 
             for (let i = 0; i < phones.length; i++) {
                 let rawPhone = String(phones[i]).replace(/\D/g, '');
-                if (!rawPhone) continue;
+                if (!rawPhone) { job.failed++; continue; }
 
                 // For Baileys format
                 let jid = rawPhone.includes('@s.whatsapp.net') ? rawPhone : `${rawPhone}@s.whatsapp.net`;
 
                 try {
-                    if (config.provider === 'baileys') {
-                        const sock = global.whatsappSessions?.get(instanceId);
-                        if (!sock) throw new Error('Bot no conectado');
-                        let msgPayload = { text: message };
-                        if (mediaUrl) {
-                            if (mediaType === 'audio') {
-                                msgPayload = { audio: { url: mediaUrl }, ptt: true, mimetype: 'audio/mp4' };
-                                // Audio messages can't have captions in WA, so we send the text separately before the audio just in case
-                                if (message && message !== '') { // only send if there is text, although validation says message is required
-                                    await sock.sendMessage(jid, { text: message });
-                                }
-                            } else if (mediaType === 'video') {
-                                msgPayload = { video: { url: mediaUrl }, caption: message };
-                            } else if (mediaType === 'document') {
-                                msgPayload = { document: { url: mediaUrl }, mimetype: 'application/pdf', fileName: 'archivo.pdf', caption: message };
-                            } else {
-                                msgPayload = { image: { url: mediaUrl }, caption: message };
-                            }
-                        }
-                        await sock.sendMessage(jid, msgPayload);
-                    } else if (config.provider === 'meta') {
-                        await axios.post(
-                            `${config.metaApiUrl}/${config.metaPhoneNumberId}/messages`,
-                            {
-                                messaging_product: 'whatsapp',
-                                to: rawPhone,
-                                type: 'text',
-                                text: { body: message }
-                            },
-                            { headers: { Authorization: `Bearer ${config.metaAccessToken}` } }
-                        );
-                    } else if (config.provider === '360dialog') {
-                        await axios.post(
-                            'https://waba-v2.360dialog.io/messages',
-                            {
-                                messaging_product: 'whatsapp',
-                                recipient_type: 'individual',
-                                to: rawPhone,
-                                type: 'text',
-                                text: { body: message }
-                            },
-                            { headers: { 'D360-API-KEY': config.dialogApiKey } }
-                        );
-                    }
-                    successCount++;
-                    console.log(`✅ [BROADCAST] ${instanceId} -> ${rawPhone}`);
+                    const adapter = getAdapter(config, activeSessions);
+                    
+                    if (!adapter) throw new Error(`Proveedor ${config.provider} no soportado o no configurado.`);
 
-                    // Log in Supabase messages for tracking
+                    await adapter.sendMessage(rawPhone, message, { mediaUrl, mediaType });
+                    
+                    job.sent++;
+                    console.log(`✅ [BROADCAST] ${campaignId} (${job.sent}/${job.total}) -> ${rawPhone}`);
+
+                    // Log in Supabase messages for tracking (non-blocking)
                     if (isSupabaseEnabled) {
-                        await supabase.from('messages').insert({
+                        supabase.from('messages').insert({
                             instance_id: instanceId,
                             tenant_id: tenantId,
                             remote_jid: jid,
                             direction: 'OUTBOUND',
-                            message_type: 'text',
+                            message_type: mediaUrl ? mediaType : 'text',
                             content: `[BROADCAST] ${mediaUrl ? `[Media: ${mediaType}] ` : ''}${message}`
-                        });
+                        }).then(() => {}).catch(() => {});
                     }
                 } catch (err) {
-                    failCount++;
+                    job.failed++;
+                    job.errors.push({ phone: rawPhone, error: err.message, at: new Date().toISOString() });
                     console.warn(`⚠️ [BROADCAST] Error enviando a ${rawPhone}:`, err.message);
                 }
 
-                // Delay to avoid spam bans (40 seconds as tested by user)
-                const delayMs = 40000;
-                await new Promise(resolve => setTimeout(resolve, delayMs));
+                // Anti-ban randomized delay (35s-60s)
+                if (i < phones.length - 1) {
+                    const delayMs = 35000 + Math.floor(Math.random() * 25000);
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
             }
-            console.log(`📣 [BROADCAST FINISHED] ${instanceId}: ${successCount} enviados, ${failCount} fallidos.`);
+
+            job.status = 'finished';
+            job.finishedAt = new Date().toISOString();
+            console.log(`📣 [BROADCAST FINISHED] ${campaignId}: ${job.sent} enviados, ${job.failed} fallidos.`);
+
+            // Auto-cleanup old jobs after 2 hours
+            setTimeout(() => broadcastJobs.delete(campaignId), 2 * 60 * 60 * 1000);
         })();
 
     } catch (err) {
         console.error('❌ Error iniciando Broadcast:', err.message);
         if (!res.headersSent) res.status(500).json({ error: 'Error interno en broadcast' });
     }
+});
+
+// --- BROADCAST STATUS (polling de progreso) ---
+router.get('/broadcast/status/:campaignId', (req, res) => {
+    const tenantId = req.tenant?.id;
+    if (!tenantId) return res.status(403).json({ error: 'Autorización requerida' });
+
+    const { campaignId } = req.params;
+    const job = broadcastJobs.get(campaignId);
+
+    if (!job) return res.status(404).json({ error: 'Campaña no encontrada o expirada.' });
+
+    // Verificar ownership (solo el tenant dueño o SUPERADMIN)
+    if (req.tenant?.role !== 'SUPERADMIN' && job.tenantId !== tenantId) {
+        return res.status(403).json({ error: 'Sin acceso a esta campaña.' });
+    }
+
+    const progress = job.total > 0 ? Math.round(((job.sent + job.failed) / job.total) * 100) : 0;
+
+    res.json({
+        success: true,
+        campaignId: job.campaignId,
+        status: job.status,
+        total: job.total,
+        sent: job.sent,
+        failed: job.failed,
+        progress,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        errors: job.errors.slice(-10) // Last 10 errors max
+    });
 });
 
 const restoreSessions = async () => {
@@ -1963,7 +2436,9 @@ const restoreSessions = async () => {
                     ownerEmail: session.owner_email,
                     provider: session.provider || 'baileys'
                 };
-                connectToWhatsApp(instanceId, config).catch(e => {
+                
+                // Use unified connection engine
+                startBotInstance(instanceId, config).catch(e => {
                     console.error(`❌ [RECOVERY] Falló restauración de ${instanceId}:`, e.message);
                     logBotEvent(instanceId, 'error', `Auto-restore failed: ${e.message}`);
                 });
@@ -1981,5 +2456,15 @@ const restoreSessions = async () => {
 
 module.exports = {
     router,
-    restoreSessions
+    restoreSessions,
+    logBotEvent,
+    updateSessionStatus,
+    trackEvent,
+    __intentUtils: {
+        normalizeIntentText,
+        hasIntentTerm,
+        classifyInboundIntent,
+        SALES_INTENT_TERMS,
+        SUPPORT_INTENT_TERMS
+    }
 };

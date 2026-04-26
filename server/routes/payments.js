@@ -1,3 +1,4 @@
+const PLANS = require('../config/plans');
 const express = require('express');
 const router = express.Router();
 const paymentService = require('../services/paymentService');
@@ -11,13 +12,7 @@ router.post('/stripe/checkout', async (req, res) => {
     try {
         const { email, plan, tenantId } = req.body; // plan: STARTER, PRO, ENTERPRISE
 
-        const PRICES = {
-            'STARTER': process.env.STRIPE_PRICE_STARTER,
-            'PRO': process.env.STRIPE_PRICE_PRO,
-            'ENTERPRISE': process.env.STRIPE_PRICE_ENTERPRISE
-        };
-
-        const priceId = PRICES[plan];
+        const priceId = PLANS[plan]?.stripe_price_id;
         if (!priceId) return res.status(400).json({ error: 'Plan inválido' });
 
         const session = await paymentService.createCheckoutSession(
@@ -40,39 +35,74 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
 
     try {
         const event = paymentService.constructWebhookEvent(req.body, sig);
+        const eventId = event.id;
 
-        // Manejar eventos
-        if (event.type === 'checkout.session.completed' || event.type === 'invoice.payment_succeeded') {
+        // 1. Check Idempotency
+        if (supabase) {
+            const { data: existingEvent } = await supabase
+                .from('stripe_events')
+                .select('event_id')
+                .eq('event_id', eventId)
+                .single();
+
+            if (existingEvent) {
+                console.log(`ℹ️ [Stripe] Evento ${eventId} ya procesado. Ignorando.`);
+                return res.json({ received: true, duplicate: true });
+            }
+        }
+
+        console.log(`🔔 [Stripe] Procesando evento: ${event.type} (${eventId})`);
+
+        // Manejar eventos de cumplimiento (Fulfillment)
+        const fulfillmentEvents = ['checkout.session.completed', 'invoice.payment_succeeded'];
+        
+        if (fulfillmentEvents.includes(event.type)) {
             const dataObject = event.data.object;
             const metadata = dataObject.metadata || {};
             const plan = metadata.plan;
-            const tenantId = metadata.tenantId || dataObject.customer_email;
+            const tenantId = metadata.tenantId || dataObject.customer_email || dataObject.customer;
 
             if (tenantId && plan && supabase) {
-                const planLimits = { 'STARTER': 1000, 'PRO': 5000, 'ENTERPRISE': 20000 };
-                const newLimit = planLimits[plan] || 500;
+                const planConfig = PLANS[plan];
+                const newLimit = planConfig ? planConfig.max_messages_monthly : 500;
 
                 try {
                     // Update usage limits automatically
-                    await supabase.from('tenant_usage_metrics')
-                        .upsert({ tenant_id: tenantId, plan_limit: newLimit, updated_at: new Date().toISOString() })
-                        .select();
+                    const { error: usageError } = await supabase.from('tenant_usage_metrics')
+                        .upsert({ 
+                            tenant_id: tenantId, 
+                            plan_limit: newLimit, 
+                            updated_at: new Date().toISOString() 
+                        }, { onConflict: 'tenant_id' });
+
+                    if (usageError) throw usageError;
 
                     // Update user profile if exists
                     await supabase.from('profiles')
                         .update({ role: plan.toLowerCase(), updated_at: new Date().toISOString() })
-                        .eq('email', tenantId); // Assumes email is often used as tenantId
+                        .eq('id', tenantId); // Use ID (UUID) if possible, fallback to email handled by metadata
 
-                    console.log(`✅ [Stripe] Suscripción activada para ${tenantId}. Plan: ${plan}, Límite: ${newLimit}`);
+                    console.log(`✅ [Stripe] Suscripción/Pago procesado para ${tenantId}. Plan: ${plan}, Límite: ${newLimit}`);
                 } catch (dbErr) {
                     console.error(`⚠️ [Stripe DB Update Error]:`, dbErr.message);
+                    // We don't return error yet, we want to log the event even if DB update fails to avoid infinite retries from Stripe
                 }
             } else {
-                console.log('✅ Pago completado (sin tenant tracking):', event.data.object.id);
+                console.log('✅ Pago recibido (sin metadata suficiente):', eventId);
             }
         } else if (event.type === 'customer.subscription.deleted') {
-            // Desactivar cuenta
-            console.log('❌ Suscripción cancelada');
+            console.log('❌ Suscripción cancelada:', event.data.object.id);
+            // logic to downgrade tenant could go here
+        }
+
+        // 2. Mark event as processed (Idempotency storage)
+        if (supabase) {
+            await supabase.from('stripe_events').insert({
+                event_id: eventId,
+                type: event.type,
+                tenant_id: event.data.object.metadata?.tenantId || null,
+                payload: event
+            });
         }
 
         res.json({ received: true });

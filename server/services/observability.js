@@ -1,103 +1,134 @@
-const WINDOW_SIZE = 200;
+/**
+ * Observability Service (Sprint 5 - SRE Hardening)
+ * Trackea latencias, SLOs por plataforma y estados end-to-end.
+ */
+const { sendPagerAlert } = require('../utils/pager');
+const crypto = require('crypto');
+const autoHealingService = require('./autoHealingService');
+const operationalState = require('./operationalState');
 
-const reqWindow = [];
-const aiWindow = [];
-const waWindow = [];
+const { sendAlert } = require('./alertService');
+const { trace, context, SpanStatusCode } = require('@opentelemetry/api');
 
-const providerState = {
-    openai: { failures: 0, lastErrorAt: null, lastSuccessAt: null },
-    gemini: { failures: 0, lastErrorAt: null, lastSuccessAt: null },
-    deepseek: { failures: 0, lastErrorAt: null, lastSuccessAt: null }
-};
+const tracer = trace.getTracer('alex-brain', '1.0.0');
 
-const pushBounded = (arr, item) => {
-    arr.push(item);
-    if (arr.length > WINDOW_SIZE) arr.shift();
-};
-
-const avg = (list) => {
-    if (!list.length) return 0;
-    return Math.round(list.reduce((acc, n) => acc + n, 0) / list.length);
-};
-
-const percentile = (list, p) => {
-    if (!list.length) return 0;
-    const sorted = [...list].sort((a, b) => a - b);
-    const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
-    return sorted[idx];
-};
-
-const createRequestMetricsMiddleware = () => (req, res, next) => {
-    const startedAt = process.hrtime.bigint();
-    res.on('finish', () => {
-        const endedAt = process.hrtime.bigint();
-        const latencyMs = Number(endedAt - startedAt) / 1e6;
-        pushBounded(reqWindow, {
-            path: req.path,
-            status: res.statusCode,
-            latencyMs,
-            ts: Date.now()
-        });
+/**
+ * withTrace: Wraps an async function in an OTel span
+ */
+async function withTrace(spanName, attributes, fn) {
+    return tracer.startActiveSpan(spanName, async (span) => {
+        if (attributes) span.setAttributes(attributes);
+        try {
+            const result = await fn();
+            span.setStatus({ code: SpanStatusCode.OK });
+            return result;
+        } catch (err) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+            span.recordException(err);
+            throw err;
+        } finally {
+            span.end();
+        }
     });
-    next();
-};
+}
 
-const recordAiCall = ({ provider, latencyMs, ok }) => {
-    const p = String(provider || 'unknown').toLowerCase();
-    pushBounded(aiWindow, { provider: p, latencyMs, ok: !!ok, ts: Date.now() });
-    if (!providerState[p]) return;
-    if (ok) {
-        providerState[p].lastSuccessAt = new Date().toISOString();
-        providerState[p].failures = 0;
-        return;
+const metrics = new Map(); // key: instance_id + channel
+
+function getKey(instance_id, channel) {
+    return `${instance_id}:${channel}`;
+}
+
+function getOrCreateMetric(instance_id, channel, tenant_id) {
+    const key = getKey(instance_id, channel);
+
+    if (!metrics.has(key)) {
+        metrics.set(key, {
+            total: 0,
+            success: 0,
+            error: 0,
+            latencies: [],
+            last_errors: [],
+            tenant_id
+        });
     }
-    providerState[p].failures += 1;
-    providerState[p].lastErrorAt = new Date().toISOString();
-};
 
-const recordWhatsappMessage = ({ latencyMs, ok }) => {
-    pushBounded(waWindow, { latencyMs, ok: !!ok, ts: Date.now() });
-};
+    return metrics.get(key);
+}
 
-const getHealthSnapshot = () => {
-    const requestLatencies = reqWindow.map((x) => x.latencyMs);
-    const request5xx = reqWindow.filter((x) => x.status >= 500).length;
+function trackEvent(event) {
+    const { instance_id, channel, status, latency_ms, error_message, tenant_id } = event;
 
-    const aiLatencies = aiWindow.filter((x) => x.ok).map((x) => x.latencyMs);
-    const aiFailures = aiWindow.filter((x) => !x.ok).length;
+    const metric = getOrCreateMetric(instance_id, channel, tenant_id);
+    metric.total++;
 
-    const waLatencies = waWindow.filter((x) => x.ok).map((x) => x.latencyMs);
-    const waFailures = waWindow.filter((x) => !x.ok).length;
+    if (status === "success") {
+        metric.success++;
+    } else {
+        metric.error++;
+        metric.last_errors.push({
+            timestamp: new Date().toISOString(),
+            error: error_message
+        });
+
+        if (metric.last_errors.length > 20) metric.last_errors.shift();
+
+        // 🚨 SRE ALERTING: If error rate > 50% in last 10 messages for a tenant, alert!
+        const recentSuccessRate = (metric.success / metric.total);
+        if (metric.total > 10 && recentSuccessRate < 0.5) {
+            sendAlert('ALTA TASA DE ERROR', `El bot ${instance_id} para el tenant ${tenant_id} está fallando críticamente.`, 'CRITICAL', {
+                tenant: tenant_id,
+                error_rate: `${(1 - recentSuccessRate) * 100}%`,
+                last_error: error_message
+            });
+        }
+    }
+
+    metric.latencies.push(latency_ms);
+    if (metric.latencies.length > 100) metric.latencies.shift();
+
+    // Integración con Auto-Healing Pro
+    try {
+        const currentMetrics = getMetrics(instance_id, channel);
+        const healthState = autoHealingService.evaluateHealth(currentMetrics);
+        autoHealingService.updateInstanceHealth(instance_id, channel, healthState).catch(() => {});
+    } catch (e) {}
+}
+
+function getMetrics(instance_id, channel) {
+    const metric = metrics.get(getKey(instance_id, channel));
+    if (!metric) return null;
+
+    const success_rate = metric.total ? (metric.success / metric.total) * 100 : 0;
+    const sorted = [...metric.latencies].sort((a, b) => a - b);
+    const p95 = sorted.length ? sorted[Math.floor(sorted.length * 0.95)] : 0;
 
     return {
-        window: {
-            requests: reqWindow.length,
-            ai_calls: aiWindow.length,
-            whatsapp_messages: waWindow.length
-        },
-        http: {
-            error_5xx_count: request5xx,
-            latency_avg_ms: avg(requestLatencies),
-            latency_p95_ms: percentile(requestLatencies, 95)
-        },
-        ai: {
-            failures: aiFailures,
-            latency_avg_ms: avg(aiLatencies),
-            latency_p95_ms: percentile(aiLatencies, 95),
-            providers: providerState
-        },
-        whatsapp: {
-            failures: waFailures,
-            latency_avg_ms: avg(waLatencies),
-            latency_p95_ms: percentile(waLatencies, 95)
-        },
-        generated_at: new Date().toISOString()
+        total: metric.total,
+        success_rate,
+        p95_latency: p95,
+        errors: metric.error,
+        last_errors: metric.last_errors,
+        tenant_id: metric.tenant_id
     };
-};
+}
+
+function getHealthSnapshot() {
+    const allMetrics = Array.from(metrics.values());
+    const totalRequests = allMetrics.reduce((acc, m) => acc + m.total, 0);
+    const totalErrors = allMetrics.reduce((acc, m) => acc + m.error, 0);
+    
+    return {
+        status: 'Observability V5 (Hardened)',
+        total_active_instances: metrics.size,
+        total_requests: totalRequests,
+        global_error_rate: totalRequests ? (totalErrors / totalRequests * 100).toFixed(2) + '%' : '0%',
+        critical_instances: allMetrics.filter(m => m.total > 10 && (m.success / m.total) < 0.8).map(m => m.tenant_id)
+    };
+}
 
 module.exports = {
-    createRequestMetricsMiddleware,
-    recordAiCall,
-    recordWhatsappMessage,
-    getHealthSnapshot
+    trackEvent,
+    getMetrics,
+    getHealthSnapshot,
+    withTrace
 };

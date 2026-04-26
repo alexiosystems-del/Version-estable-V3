@@ -8,8 +8,8 @@ const config = { supabaseUrl: null, supabaseKey: "TU_CLAVE_AQUI" };
 const cleanStr = (s) => (s || "").trim();
 
 // Hardcoded fallbacks (safe to expose — these are public Supabase credentials)
-const SUPABASE_URL_FALLBACK = 'https://ygsmooajrqldzdtcukfd.supabase.co';
-const SUPABASE_KEY_FALLBACK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inlnc21vb2FqcnFsZHpkdGN1a2ZkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE3NDYxMzIsImV4cCI6MjA4NzMyMjEzMn0.ioireDt3ZMI3RBKxwgslXQM9Xiw1zVAkOwnZ6MAXulM';
+const SUPABASE_URL_FALLBACK = 'https://euknjjnjcgdlksrcbkde.supabase.co';
+const SUPABASE_KEY_FALLBACK = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV1a25qam5qY2dkbGtzcmNia2RlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNzUxMzUsImV4cCI6MjA4OTk1MTEzNX0.a9xC0xO-01D8resooEmOOpe8ancv_hQaJN39WFHUqFE';
 
 const envUrl = cleanStr(import.meta.env.VITE_SUPABASE_URL);
 const envKey = cleanStr(import.meta.env.VITE_SUPABASE_ANON_KEY);

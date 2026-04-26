@@ -66,7 +66,14 @@ const listPromptVersions = async ({ tenantId, instanceId, limit = 20 }) => {
         .order('updated_at', { ascending: false })
         .limit(limit);
 
-    if (error) throw new Error(`No se pudo listar versiones: ${error.message}`);
+    if (error) {
+        const msg = (error.message || '').toLowerCase();
+        if (msg.includes('could not find the table') || msg.includes('relation') || msg.includes('does not exist')) {
+            console.warn(`[PromptService] Tabla ${promptVersionsTable} no disponible. Fallback a lista vacía.`);
+            return [];
+        }
+        throw new Error(`No se pudo listar versiones: ${error.message}`);
+    }
     return data || [];
 };
 

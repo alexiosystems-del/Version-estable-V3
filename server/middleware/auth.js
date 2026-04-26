@@ -44,7 +44,11 @@ const authenticateTenant = async (req, res, next) => {
         // 1. Check if it's a bypass token (must be configured via env var, disabled if not set)
         const BYPASS_TOKEN = process.env.SUPERADMIN_BYPASS_TOKEN;
         if (BYPASS_TOKEN && token === BYPASS_TOKEN) {
-            console.warn('⚠️ SuperAdmin bypass token used — audit this access');
+            if (process.env.NODE_ENV === 'production') {
+                console.error('🚨 BYPASS ADMINISTRATIVO BLOQUEADO: El bypass por token está deshabilitado en producción por seguridad.');
+                return res.status(403).json({ error: 'Bypass tokens disabled in production.', code: 'BYPASS_DISABLED_PROD' });
+            }
+            console.warn('⚠️ SuperAdmin bypass token used (Desarrollo) — audit this access');
             req.tenant = {
                 id: 'tenant_superadmin',
                 plan: 'ENTERPRISE',

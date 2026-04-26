@@ -7,19 +7,18 @@ const ALLOW_ORIGIN_FALLBACK = import.meta.env.VITE_ALLOW_ORIGIN_FALLBACK !== 'fa
 let lastResolvedApiBase = null;
 
 const getApiBases = () => {
-  const envBase = normalize(import.meta.env.VITE_API_URL);
-  const primaryBase = envBase || RENDER_BACKEND_HINT;
-
-  if (FORCE_PRIMARY_BACKEND) return [primaryBase];
-
-  const bases = [primaryBase];
-
-  if (ALLOW_ORIGIN_FALLBACK && typeof window !== 'undefined') {
-    const origin = normalize(window.location.origin);
-    if (origin && !bases.includes(origin)) bases.push(origin);
+  let envBase = normalize(import.meta.env.VITE_API_URL);
+  
+  if (envBase && envBase.includes('supabase.co')) {
+    console.warn('[API] VITE_API_URL points to Supabase. Ignoring for Backend routing.');
+    envBase = null;
   }
+  
+  // Como el dashboard ahora es fullstack continuo, el backend siempre es el mismo origin que el frontend.
+  const originBase = typeof window !== 'undefined' ? window.location.origin : '';
+  const primaryBase = envBase || originBase || 'https://whatsapp-fullstack-1-yjao.onrender.com';
 
-  return bases;
+  return [primaryBase];
 };
 
 export const getPreferredApiBase = () => getApiBases()[0] || null;
@@ -37,7 +36,7 @@ export const fetchWithApiFallback = async (path, options = {}) => {
 
   // Inject Authorization header globally
   const authHeaders = getAuthHeaders();
-  const mergedHeaders = { ...headers, ...authHeaders };
+  const mergedHeaders = { 'Content-Type': 'application/json', ...headers, ...authHeaders };
 
   // Debug log for the 401 loop investigation
   if (path.includes('/api/saas/status')) {
@@ -50,6 +49,7 @@ export const fetchWithApiFallback = async (path, options = {}) => {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      console.log(`[API] Fetching: ${url}`);
       const response = await fetch(url, { ...fetchOptions, headers: mergedHeaders, signal: controller.signal });
       clearTimeout(timeout);
 

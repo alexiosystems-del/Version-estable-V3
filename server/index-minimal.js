@@ -1,12 +1,12 @@
 // Deploy Trigger: 2026-02-22 08:00 (Stability Patch - Alex IO v7.2)
 require('dotenv').config();
+require('./utils/envValidator').validateEnv(); // FASE 0 Boot validation
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const https = require('https');
 const axios = require('axios');
 const { Server } = require("socket.io");
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, delay, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
@@ -43,8 +43,22 @@ const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supaba
 
 // --- SERVER SETUP ---
 const app = express();
-const PORT = process.env.PORT || 3000;
-app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
+// --- SECURE CORS (PHASE 0) ---
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+    : [];
+
+app.use(cors({
+    origin: (origin, callback) => {
+        if (process.env.NODE_ENV !== 'production' && allowedOrigins.length === 0) return callback(null, true);
+        if (!origin && process.env.NODE_ENV !== 'production') return callback(null, true);
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        
+        console.error(`❌ CORS BLOCKED: Origin ${origin} not allowed`);
+        callback(new Error('CORS_VIOLATION'));
+    },
+    credentials: true
+}));
 app.use(express.json());
 
 // --- HEALTH CHECK (CRITICAL FOR RENDER) ---
@@ -463,6 +477,14 @@ async function speakAlex(id, text) {
 const EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL || `http://localhost:${PORT}`;
 
 async function connectToWhatsApp() {
+    const { 
+        makeWASocket, 
+        useMultiFileAuthState, 
+        DisconnectReason, 
+        delay, 
+        downloadMediaMessage 
+    } = require('@whiskeysockets/baileys');
+    
     console.log('🚀 [ALEX] INICIANDO MOTOR V7.1...');
     if (isConnecting && global.connectionStatus === 'CONNECTING') {
         console.log('⚠️ [ALEX] Connection already in progress. Skipping duplicate call.');
@@ -499,12 +521,11 @@ async function connectToWhatsApp() {
         auth: state,
         printQRInTerminal: true,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '120.0.0'],
+        browser: ['Windows', 'Chrome', '20.0.04'],
         syncFullHistory: false,
         connectTimeoutMs: 60000,
-        defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
-        markOnlineOnConnect: false, // Prevents early presence errors
+        markOnlineOnConnect: false,
         generateHighQualityLinkPreview: false,
         retryRequestDelayMs: 5000,
     });
@@ -609,6 +630,7 @@ async function connectToWhatsApp() {
                     let audioBuffer = null;
                     if (audioMsg) {
                         try {
+                            const { downloadMediaMessage } = require('@whiskeysockets/baileys');
                             audioBuffer = await downloadMediaMessage(
                                 msg, 'buffer',
                                 { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage }

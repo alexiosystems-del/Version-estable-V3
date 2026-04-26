@@ -1,56 +1,66 @@
 import React, { useState, useEffect } from 'react';
 import { fetchJsonWithApiFallback, getAuthHeaders } from '../api';
 import {
-    Users,
-    DollarSign,
-    Activity,
-    ShieldAlert,
-    TrendingUp,
-    Search,
-    MessageCircle,
-    Server,
-    ArrowUpRight,
-    ArrowDownRight,
-    MoreVertical,
-    ChevronDown,
-    ChevronRight,
-    RefreshCw,
-    Power,
-    Trash2,
-    AlertTriangle,
-    CheckCircle2,
-    Info,
-    Cpu,
-    Zap,
-    Heart
+    Users, DollarSign, Activity, ShieldAlert, Search, MessageCircle, Server,
+    ChevronDown, ChevronRight, RefreshCw, Power, Trash2, AlertTriangle,
+    Info, Cpu, Zap, Heart
 } from 'lucide-react';
 
+// --- Inject Inter Font ---
+if (typeof document !== 'undefined' && !document.getElementById('inter-font-sa')) {
+    const link = document.createElement('link');
+    link.id = 'inter-font-sa';
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap';
+    document.head.appendChild(link);
+}
+
+// --- DESIGN TOKENS: Soft Mode + Deep Ocean Blue ---
+const T = {
+    bg: '#1a2744',
+    bgGradient: 'linear-gradient(135deg, #1a2744 0%, #162038 50%, #1e2d4d 100%)',
+    glass: 'rgba(255, 255, 255, 0.06)',
+    glassBorder: 'rgba(0, 119, 134, 0.2)',
+    glassHover: 'rgba(255, 255, 255, 0.1)',
+    accent: '#007786',
+    accentLight: '#00a5b5',
+    accentGlow: 'rgba(0, 119, 134, 0.3)',
+    text: '#e8edf5',
+    textMuted: '#94a3c0',
+    textDim: '#607090',
+    success: '#10b981',
+    warning: '#f59e0b',
+    danger: '#ef4444',
+    purple: '#a78bfa',
+    cyan: '#22d3ee',
+    font: '"Inter", -apple-system, BlinkMacSystemFont, sans-serif',
+};
+
+// --- Shared Styles ---
+const glassCard = (extra: React.CSSProperties = {}): React.CSSProperties => ({
+    background: T.glass,
+    border: `1px solid ${T.glassBorder}`,
+    borderRadius: 16,
+    backdropFilter: 'blur(20px)',
+    WebkitBackdropFilter: 'blur(20px)',
+    ...extra,
+});
+
 interface GlobalStats {
-    total_users: number;
-    active_bots: number;
-    total_revenue: number;
-    total_messages: number;
-    bots_with_errors: number;
-    estimated_daily_cost: number;
+    total_users: number; active_bots: number; total_revenue: number;
+    total_messages: number; bots_with_errors: number; estimated_daily_cost: number;
 }
 
 interface SreHealthSnapshot {
     http: { error_5xx_count: number; latency_avg_ms: number; latency_p95_ms: number };
-    ai: { failures: number; latency_avg_ms: number; providers: Record<string, { failures: number; lastErrorAt: string | null }> };
+    ai: { failures: number; latency_avg_ms: number; providers: Record<string, any> };
     whatsapp: { failures: number; latency_avg_ms: number; latency_p95_ms: number };
     window: { requests: number; ai_calls: number; whatsapp_messages: number };
     generated_at: string;
 }
 
 const SuperAdminDashboard = () => {
-    const [stats, setStats] = useState<GlobalStats>({
-        total_users: 0,
-        active_bots: 0,
-        total_revenue: 0,
-        total_messages: 0,
-        bots_with_errors: 0,
-        estimated_daily_cost: 0
-    });
+    const [stats, setStats] = useState<GlobalStats>({ total_users: 0, active_bots: 0, total_revenue: 0, total_messages: 0, bots_with_errors: 0, estimated_daily_cost: 0 });
     const [clients, setClients] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -59,472 +69,396 @@ const SuperAdminDashboard = () => {
     const [loadingDetails, setLoadingDetails] = useState(false);
     const [actionLoading, setActionLoading] = useState<string | null>(null);
     const [healthData, setHealthData] = useState<SreHealthSnapshot | null>(null);
+    const [aiDiag, setAiDiag] = useState<any>(null);
 
-    useEffect(() => {
-        fetchGlobalData();
-        const interval = setInterval(fetchGlobalData, 30000); // Auto-refresh every 30s
-        return () => clearInterval(interval);
-    }, []);
+    useEffect(() => { fetchGlobalData(); const iv = setInterval(fetchGlobalData, 30000); return () => clearInterval(iv); }, []);
 
     const fetchGlobalData = async () => {
         try {
             setLoading(true);
-            const { response, data } = await fetchJsonWithApiFallback('/api/saas/superadmin/clients', {
-                headers: { ...getAuthHeaders() }
-            });
-
+            const { response, data } = await fetchJsonWithApiFallback('/api/saas/superadmin/clients', { headers: { ...getAuthHeaders() } });
             if (response.ok && data.clients) {
-                const totalMsgs = data.clients.reduce((acc: number, curr: any) => acc + (curr.usage?.messages_sent || 0), 0);
+                const totalMsgs = data.clients.reduce((acc: number, c: any) => acc + (c.usage?.messages_sent || 0), 0);
                 const allBots = data.clients.flatMap((c: any) => c.bots || []);
-                const totalBots = allBots.length;
-                const botsWithErrors = allBots.filter((b: any) => b.last_error).length;
-
                 const revMap: Record<string, number> = { 'PRO': 29.99, 'ENTERPRISE': 99.99, 'FREE': 0 };
-                const revenue = data.clients.reduce((acc: number, curr: any) => acc + (revMap[curr.plan?.toUpperCase()] || 0), 0);
-
-                // Estimate daily cost from AI usage
+                const revenue = data.clients.reduce((acc: number, c: any) => acc + (revMap[c.plan?.toUpperCase()] || 0), 0);
                 let totalCost = 0;
-                allBots.forEach((b: any) => {
-                    if (b.ai_usage) {
-                        totalCost += (b.ai_usage.openai?.tokens || 0) / 1000000 * 0.60;
-                        totalCost += (b.ai_usage.deepseek?.tokens || 0) / 1000000 * 0.28;
-                    }
-                });
-
+                allBots.forEach((b: any) => { if (b.ai_usage) { totalCost += (b.ai_usage.openai?.tokens || 0) / 1e6 * 0.60; totalCost += (b.ai_usage.deepseek?.tokens || 0) / 1e6 * 0.28; } });
                 setClients(data.clients);
-                setStats({
-                    total_users: data.clients.length,
-                    active_bots: totalBots,
-                    total_revenue: revenue,
-                    total_messages: totalMsgs,
-                    bots_with_errors: botsWithErrors,
-                    estimated_daily_cost: totalCost
-                });
+                setStats({ total_users: data.clients.length, active_bots: allBots.length, total_revenue: revenue, total_messages: totalMsgs, bots_with_errors: allBots.filter((b: any) => b.last_error).length, estimated_daily_cost: totalCost });
             }
-
-            // Fetch SRE Health Snapshot
-            const healthRes = await fetchJsonWithApiFallback('/api/sre/health', {
-                headers: { ...getAuthHeaders() }
-            });
-            if (healthRes.response.ok && healthRes.data.success) {
-                setHealthData(healthRes.data.health);
-            }
-        } catch (err: any) {
-            console.error("SuperAdmin Error:", err.message);
-        } finally {
-            setLoading(false);
-        }
+            try {
+                const healthRes = await fetchJsonWithApiFallback('/api/sre/health', { headers: { ...getAuthHeaders() } });
+                if (healthRes.response.ok && healthRes.data) {
+                    const raw = healthRes.data.health || healthRes.data || {};
+                    setHealthData({
+                        http: { error_5xx_count: 0, latency_avg_ms: 0, latency_p95_ms: 0, ...raw.http },
+                        ai: { failures: 0, latency_avg_ms: 0, providers: {}, ...raw.ai },
+                        whatsapp: { failures: 0, latency_avg_ms: 0, latency_p95_ms: 0, ...raw.whatsapp },
+                        window: { requests: 0, ai_calls: 0, whatsapp_messages: 0, ...raw.window },
+                        generated_at: raw.generated_at || new Date().toISOString()
+                    });
+                }
+            } catch (e: any) { console.warn('SRE Health fetch failed:', e.message); }
+            // Fetch AI Diagnostics
+            try {
+                const diagRes = await fetchJsonWithApiFallback('/api/diagnostics/ai', {});
+                if (diagRes.response.ok && diagRes.data) setAiDiag(diagRes.data);
+            } catch (e: any) { console.warn('AI Diag fetch failed:', e.message); }
+        } catch (err: any) { console.error("SuperAdmin Error:", err.message); }
+        finally { setLoading(false); }
     };
 
     const fetchBotDetails = async (instanceId: string) => {
-        if (expandedBot === instanceId) {
-            setExpandedBot(null);
-            setBotDetails(null);
-            return;
-        }
-        setExpandedBot(instanceId);
-        setLoadingDetails(true);
+        if (expandedBot === instanceId) { setExpandedBot(null); setBotDetails(null); return; }
+        setExpandedBot(instanceId); setLoadingDetails(true);
         try {
-            const { response, data } = await fetchJsonWithApiFallback(`/api/saas/superadmin/bot-details/${instanceId}`, {
-                headers: { ...getAuthHeaders() }
-            });
-            if (response.ok && data.success) {
-                setBotDetails(data);
-            }
-        } catch (err: any) {
-            console.error("Bot details error:", err.message);
-        } finally {
-            setLoadingDetails(false);
-        }
+            const { response, data } = await fetchJsonWithApiFallback(`/api/saas/superadmin/bot-details/${instanceId}`, { headers: { ...getAuthHeaders() } });
+            if (response.ok && data.success) setBotDetails(data);
+        } catch (err: any) { console.error("Bot details error:", err.message); }
+        finally { setLoadingDetails(false); }
     };
 
     const executeBotAction = async (instanceId: string, action: string) => {
-        if (action === 'delete' && !confirm(`¿Estás seguro de ELIMINAR permanentemente el bot ${instanceId}?`)) return;
+        if (action === 'delete' && !confirm(`¿Eliminar permanentemente el bot ${instanceId}?`)) return;
         setActionLoading(`${instanceId}_${action}`);
         try {
-            const { response, data } = await fetchJsonWithApiFallback('/api/saas/superadmin/bot-action', {
-                method: 'POST',
-                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                body: JSON.stringify({ instanceId, action })
-            });
-            if (response.ok) {
-                alert(data.message || 'Acción ejecutada.');
-                fetchGlobalData();
-            } else {
-                alert(data.error || 'Error ejecutando acción');
-            }
-        } catch (err: any) {
-            alert('Error: ' + err.message);
-        } finally {
-            setActionLoading(null);
-        }
+            const { response, data } = await fetchJsonWithApiFallback('/api/saas/superadmin/bot-action', { method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ instanceId, action }) });
+            if (response.ok) { alert(data.message || 'Acción ejecutada.'); fetchGlobalData(); }
+            else alert(data.error || 'Error');
+        } catch (err: any) { alert('Error: ' + err.message); }
+        finally { setActionLoading(null); }
     };
 
-    const filteredClients = clients.filter(c =>
-        c.email?.toLowerCase().includes(searchTerm.toLowerCase())
+    const filteredClients = clients.filter(c => c.email?.toLowerCase().includes(searchTerm.toLowerCase()));
+
+    if (loading && clients.length === 0) return (
+        <div style={{ minHeight: '100vh', background: T.bgGradient, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: T.font }}>
+            <div style={{ textAlign: 'center', color: T.textMuted }}>
+                <RefreshCw size={32} style={{ animation: 'spin 1s linear infinite', marginBottom: 12, color: T.accent }} />
+                <p>Accediendo a la Consola de Control...</p>
+            </div>
+        </div>
     );
 
-    const getHealthColor = (score: number) => {
-        if (score >= 80) return 'text-emerald-400';
-        if (score >= 50) return 'text-yellow-400';
-        return 'text-red-400';
-    };
-
-    const getHealthBg = (score: number) => {
-        if (score >= 80) return 'bg-emerald-500';
-        if (score >= 50) return 'bg-yellow-500';
-        return 'bg-red-500';
-    };
-
-    const getLevelIcon = (level: string) => {
-        if (level === 'error') return <AlertTriangle size={12} className="text-red-400" />;
-        if (level === 'warn') return <AlertTriangle size={12} className="text-yellow-400" />;
-        return <Info size={12} className="text-blue-400" />;
-    };
-
-    const getLevelBg = (level: string) => {
-        if (level === 'error') return 'border-red-900/50 bg-red-950/30';
-        if (level === 'warn') return 'border-yellow-900/50 bg-yellow-950/20';
-        return 'border-slate-800 bg-slate-900/30';
-    };
-
-    if (loading && clients.length === 0) return <div className="p-8 text-center text-slate-400">Accediendo a la Consola de Control de ALEX IO...</div>;
-
     return (
-        <div className="min-h-screen bg-slate-900 text-slate-100 p-8 font-sans">
-            <header className="mb-10 flex justify-between items-end">
+        <div style={{ minHeight: '100vh', background: T.bgGradient, color: T.text, padding: '32px 40px', fontFamily: T.font }}>
+            {/* Ambient Glow */}
+            <div style={{ position: 'fixed', top: -200, right: -200, width: 500, height: 500, borderRadius: '50%', background: `radial-gradient(circle, ${T.accentGlow} 0%, transparent 70%)`, pointerEvents: 'none', zIndex: 0 }} />
+
+            {/* Header */}
+            <header style={{ marginBottom: 40, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', position: 'relative', zIndex: 1 }}>
                 <div>
-                    <div className="flex items-center gap-2 mb-2 text-blue-500">
-                        <ShieldAlert size={20} />
-                        <span className="text-xs font-bold uppercase tracking-widest">SaaS SuperAdmin</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, color: T.accent }}>
+                        <ShieldAlert size={18} />
+                        <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 3 }}>SaaS SuperAdmin</span>
                     </div>
-                    <h1 className="text-4xl font-bold tracking-tight">Consola Global <span className="text-blue-500">ALEX IO</span></h1>
+                    <h1 style={{ fontSize: 36, fontWeight: 800, margin: 0, letterSpacing: -0.5 }}>
+                        Consola Global <span style={{ color: T.accentLight }}>ALEX IO</span>
+                    </h1>
                 </div>
-                <div className="flex gap-3">
-                    <button onClick={fetchGlobalData} className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-xl text-sm flex items-center gap-2 transition-colors">
-                        <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Actualizar
+                <div style={{ display: 'flex', gap: 12 }}>
+                    <button onClick={fetchGlobalData} style={{ ...glassCard({ borderRadius: 12, padding: '8px 16px', cursor: 'pointer', color: T.textMuted, fontSize: 13, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, transition: 'all 0.2s' })}}>
+                        <RefreshCw size={14} style={loading ? { animation: 'spin 1s linear infinite' } : {}} /> Actualizar
                     </button>
-                    <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-                        <input type="text" placeholder="Buscar por email..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl py-2 pl-10 pr-4 text-sm focus:ring-2 focus:ring-blue-500 outline-none w-64" />
+                    <div style={{ position: 'relative' }}>
+                        <Search style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: T.textDim }} size={16} />
+                        <input type="text" placeholder="Buscar por email..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+                            style={{ ...glassCard({ borderRadius: 12, padding: '8px 12px 8px 38px', fontSize: 13, color: T.text, outline: 'none', width: 240 })} as any} />
                     </div>
                 </div>
             </header>
 
-            {/* Metrics */}
-            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-10">
-                <MetricCard title="Clientes" value={stats.total_users} icon={<Users className="text-blue-400" size={18} />} />
-                <MetricCard title="Bots Activos" value={stats.active_bots} icon={<Server className="text-emerald-400" size={18} />} />
-                <MetricCard title="MRR" value={`$${Math.round(stats.total_revenue)}`} icon={<DollarSign className="text-yellow-400" size={18} />} />
-                <MetricCard title="Mensajes" value={stats.total_messages.toLocaleString()} icon={<MessageCircle className="text-purple-400" size={18} />} />
-                <MetricCard title="Bots con Errores" value={stats.bots_with_errors} icon={<AlertTriangle className="text-red-400" size={18} />} accent={stats.bots_with_errors > 0 ? 'red' : undefined} />
-                <MetricCard title="Costo IA / Día" value={`$${stats.estimated_daily_cost.toFixed(4)}`} icon={<Cpu className="text-cyan-400" size={18} />} />
+            {/* Metric Cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 16, marginBottom: 40, position: 'relative', zIndex: 1 }}>
+                <MetricCard icon={<Users size={18} />} title="Clientes" value={stats.total_users} color={T.accentLight} />
+                <MetricCard icon={<Server size={18} />} title="Bots Activos" value={stats.active_bots} color={T.success} />
+                <MetricCard icon={<DollarSign size={18} />} title="MRR" value={`$${Math.round(stats.total_revenue)}`} color={T.warning} />
+                <MetricCard icon={<MessageCircle size={18} />} title="Mensajes" value={stats.total_messages.toLocaleString()} color={T.purple} />
+                <MetricCard icon={<AlertTriangle size={18} />} title="Bots con Errores" value={stats.bots_with_errors} color={stats.bots_with_errors > 0 ? T.danger : T.textDim} accent={stats.bots_with_errors > 0} />
+                <MetricCard icon={<Cpu size={18} />} title="Costo IA / Día" value={`$${stats.estimated_daily_cost.toFixed(4)}`} color={T.cyan} />
             </div>
 
-            {/* SRE Health Snapshot (v5) */}
+            {/* SRE Health */}
             {healthData && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-10">
-                    <div className="lg:col-span-3 flex items-center gap-2 mb-2">
-                        <Activity size={18} className="text-emerald-500" />
-                        <h3 className="font-bold text-sm uppercase tracking-widest text-slate-400">Observabilidad SRE v5 (Real-time)</h3>
-                        <span className="text-[10px] text-slate-600 ml-auto">Última actualización: {new Date(healthData.generated_at).toLocaleTimeString()}</span>
+                <div style={{ marginBottom: 40, position: 'relative', zIndex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                        <Activity size={16} style={{ color: T.success }} />
+                        <h3 style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 3, color: T.textMuted, margin: 0 }}>Observabilidad SRE v5</h3>
+                        <span style={{ fontSize: 10, color: T.textDim, marginLeft: 'auto' }}>Última: {new Date(healthData.generated_at).toLocaleTimeString()}</span>
                     </div>
-
-                    <HealthPanel
-                        title="Infraestructura HTTP"
-                        icon={<Server size={16} />}
-                        metrics={[
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+                        <HealthPanel title="Infraestructura HTTP" icon={<Server size={15} />} metrics={[
                             { label: 'Errores 5xx', value: healthData.http.error_5xx_count, unit: 'req', bad: healthData.http.error_5xx_count > 0 },
                             { label: 'Latencia P95', value: healthData.http.latency_p95_ms, unit: 'ms', warn: healthData.http.latency_p95_ms > 800 },
                             { label: 'Ventana', value: healthData.window.requests, unit: 'req' }
-                        ]}
-                    />
-
-                    <HealthPanel
-                        title="Motores de IA"
-                        icon={<Zap size={16} />}
-                        metrics={[
+                        ]} />
+                        <HealthPanel title="Motores de IA" icon={<Zap size={15} />} metrics={[
                             { label: 'Fallos Críticos', value: healthData.ai.failures, unit: 'err', bad: healthData.ai.failures > 0 },
                             { label: 'Latencia Promedio', value: healthData.ai.latency_avg_ms, unit: 'ms' },
                             { label: 'Llamadas (Win)', value: healthData.window.ai_calls, unit: 'op' }
-                        ]}
-                    />
-
-                    <HealthPanel
-                        title="WhatsApp Gateway"
-                        icon={<MessageCircle size={16} />}
-                        metrics={[
+                        ]} />
+                        <HealthPanel title="WhatsApp Gateway" icon={<MessageCircle size={15} />} metrics={[
                             { label: 'Errores Proces.', value: healthData.whatsapp.failures, unit: 'msg', bad: healthData.whatsapp.failures > 0 },
                             { label: 'Latencia P95', value: healthData.whatsapp.latency_p95_ms, unit: 'ms', warn: healthData.whatsapp.latency_p95_ms > 2000 },
                             { label: 'Tráfico (Win)', value: healthData.window.whatsapp_messages, unit: 'msg' }
-                        ]}
-                    />
+                        ]} />
+                    </div>
+                </div>
+            )}
+
+            {/* AI Provider Health Panel */}
+            {aiDiag && (
+                <div style={{ marginBottom: 40, position: 'relative', zIndex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                        <Zap size={16} style={{ color: T.warning }} />
+                        <h3 style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 3, color: T.textMuted, margin: 0 }}>Estado de APIs de IA — Créditos & Conexión</h3>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 16 }}>
+                        {[
+                            { name: 'Gemini', key: 'gemini', color: '#4285F4', icon: '🔷' },
+                            { name: 'OpenAI', key: 'openai', color: '#10a37f', icon: '🟢' },
+                            { name: 'DeepSeek', key: 'deepseek', color: T.purple, icon: '🟣' },
+                            { name: 'Anthropic', key: 'anthropic', color: '#d97706', icon: '🟠' },
+                        ].map(provider => {
+                            const info = aiDiag[provider.key];
+                            if (!info) return null;
+                            const status = !info.configured ? 'MISSING' : info.dead ? 'DEAD' : 'ONLINE';
+                            const statusColor = status === 'ONLINE' ? T.success : status === 'DEAD' ? T.danger : T.textDim;
+                            const statusBg = status === 'ONLINE' ? 'rgba(16,185,129,0.12)' : status === 'DEAD' ? 'rgba(239,68,68,0.12)' : 'rgba(255,255,255,0.04)';
+                            return (
+                                <div key={provider.key} style={glassCard({ padding: 18 })}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+                                        <span style={{ fontSize: 18 }}>{provider.icon}</span>
+                                        <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{provider.name}</span>
+                                        <span style={{
+                                            marginLeft: 'auto', fontSize: 9, fontWeight: 800, padding: '3px 10px', borderRadius: 20,
+                                            background: statusBg, color: statusColor, border: `1px solid ${statusColor}40`,
+                                            letterSpacing: 1, textTransform: 'uppercase'
+                                        }}>{status}</span>
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                                            <span style={{ color: T.textDim }}>API Key</span>
+                                            <span style={{ fontFamily: 'monospace', color: info.configured ? T.text : T.danger, fontSize: 10 }}>{info.masked}</span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                                            <span style={{ color: T.textDim }}>Estado</span>
+                                            <span style={{ color: statusColor, fontWeight: 600 }}>{
+                                                status === 'ONLINE' ? '✓ Operativa' : status === 'DEAD' ? '✗ Expirada/Sin crédito' : '— No configurada'
+                                            }</span>
+                                        </div>
+                                        {info.dead && (
+                                            <div style={{ fontSize: 10, color: T.danger, background: 'rgba(239,68,68,0.08)', padding: '6px 10px', borderRadius: 8, marginTop: 4 }}>
+                                                ⚠️ Key desactivada por Circuit Breaker. Renovar en Render.
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {/* Cache Stats */}
+                        {aiDiag.cache && (
+                            <div style={glassCard({ padding: 18 })}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+                                    <span style={{ fontSize: 18 }}>📊</span>
+                                    <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Cache IA</span>
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                    {[
+                                        ['Hits', aiDiag.cache.hits],
+                                        ['Misses', aiDiag.cache.misses],
+                                        ['Keys Activas', aiDiag.cache.keys],
+                                        ['Hit Rate', aiDiag.cache.hits + aiDiag.cache.misses > 0 ? `${((aiDiag.cache.hits / (aiDiag.cache.hits + aiDiag.cache.misses)) * 100).toFixed(1)}%` : '0%']
+                                    ].map(([label, value]) => (
+                                        <div key={label as string} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
+                                            <span style={{ color: T.textDim }}>{label}</span>
+                                            <span style={{ fontFamily: 'monospace', color: T.text }}>{value}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 
             {/* Clients Table */}
-            <section className="bg-slate-950 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
-                <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-950/50">
-                    <h3 className="font-bold flex items-center gap-2"><Users size={18} className="text-slate-500" /> Directorio de Entidades (Tenants)</h3>
-                    <span className="text-xs text-slate-500">{filteredClients.length} clientes</span>
+            <section style={{ ...glassCard({ overflow: 'hidden', boxShadow: `0 8px 32px rgba(0,0,0,0.2)` }), position: 'relative', zIndex: 1 }}>
+                <div style={{ padding: '20px 24px', borderBottom: `1px solid ${T.glassBorder}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Users size={16} style={{ color: T.textDim }} /> Directorio de Entidades (Tenants)
+                    </h3>
+                    <span style={{ fontSize: 11, color: T.textDim }}>{filteredClients.length} clientes</span>
                 </div>
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left">
-                        <thead className="bg-slate-900/50 text-slate-500 text-[10px] uppercase font-bold tracking-widest border-b border-slate-900">
-                            <tr>
-                                <th className="px-6 py-4">Tenant (Email)</th>
-                                <th className="px-6 py-4">Plan</th>
-                                <th className="px-6 py-4">Uso</th>
-                                <th className="px-6 py-4">Tokens IA</th>
-                                <th className="px-6 py-4">Bots</th>
+                <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse' }}>
+                        <thead>
+                            <tr style={{ borderBottom: `1px solid ${T.glassBorder}` }}>
+                                {['Tenant (Email)', 'Plan', 'Uso', 'Tokens IA', 'Bots'].map(h => (
+                                    <th key={h} style={{ padding: '14px 24px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 2, color: T.textDim }}>{h}</th>
+                                ))}
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-900">
+                        <tbody>
                             {filteredClients.map(client => (
                                 <React.Fragment key={client.id}>
-                                    <tr className="hover:bg-slate-900/40 transition-colors">
-                                        <td className="px-6 py-4">
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-8 h-8 rounded-lg bg-blue-600/10 flex items-center justify-center text-blue-500 font-bold text-xs border border-blue-500/20">{client.email?.[0]?.toUpperCase()}</div>
+                                    <tr style={{ borderBottom: `1px solid rgba(255,255,255,0.03)`, transition: 'background 0.15s' }}
+                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.03)')}
+                                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                                        <td style={{ padding: '14px 24px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                                <div style={{ width: 34, height: 34, borderRadius: 10, background: `linear-gradient(135deg, ${T.accent}, ${T.accentLight})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 13 }}>
+                                                    {client.email?.[0]?.toUpperCase()}
+                                                </div>
                                                 <div>
-                                                    <p className="text-sm font-semibold">{client.email}</p>
-                                                    <p className="text-xs text-slate-500">ID: {client.tenant_id}</p>
+                                                    <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{client.email}</p>
+                                                    <p style={{ margin: 0, fontSize: 11, color: T.textDim }}>ID: {client.tenant_id}</p>
                                                 </div>
                                             </div>
                                         </td>
-                                        <td className="px-6 py-4">
-                                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${client.plan === 'PRO' ? 'bg-yellow-500/10 text-yellow-500' : client.plan === 'ENTERPRISE' ? 'bg-purple-500/10 text-purple-500' : 'bg-slate-800 text-slate-400'}`}>
-                                                {client.plan || 'FREE'}
-                                            </span>
+                                        <td style={{ padding: '14px 24px' }}>
+                                            <span style={{ fontSize: 10, padding: '3px 10px', borderRadius: 20, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1,
+                                                background: client.plan === 'ENTERPRISE' ? 'rgba(167,139,250,0.15)' : client.plan === 'PRO' ? 'rgba(245,158,11,0.15)' : 'rgba(255,255,255,0.06)',
+                                                color: client.plan === 'ENTERPRISE' ? T.purple : client.plan === 'PRO' ? T.warning : T.textDim,
+                                                border: `1px solid ${client.plan === 'ENTERPRISE' ? 'rgba(167,139,250,0.3)' : client.plan === 'PRO' ? 'rgba(245,158,11,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                                            }}>{client.plan || 'FREE'}</span>
                                         </td>
-                                        <td className="px-6 py-4">
-                                            <div className="flex flex-col gap-1 w-24">
-                                                <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                                    <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: `${Math.min(((client.usage?.messages_sent || 0) / Math.max(client.usage?.plan_limit || 1, 1)) * 100, 100)}%` }}></div>
+                                        <td style={{ padding: '14px 24px' }}>
+                                            <div style={{ width: 90 }}>
+                                                <div style={{ width: '100%', height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                                                    <div style={{ width: `${Math.min(((client.usage?.messages_sent || 0) / Math.max(client.usage?.plan_limit || 1, 1)) * 100, 100)}%`, height: '100%', borderRadius: 3, background: `linear-gradient(90deg, ${T.accent}, ${T.accentLight})` }} />
                                                 </div>
-                                                <span className="text-[10px] text-slate-400">{client.usage?.messages_sent || 0} / {client.usage?.plan_limit || 0}</span>
+                                                <span style={{ fontSize: 10, color: T.textDim }}>{client.usage?.messages_sent || 0} / {client.usage?.plan_limit || 0}</span>
                                             </div>
                                         </td>
-                                        <td className="px-6 py-4">
-                                            <p className="text-xs font-mono text-purple-300">{client.usage?.tokens_consumed ? `${(client.usage.tokens_consumed / 1000).toFixed(1)}k` : '0'}</p>
+                                        <td style={{ padding: '14px 24px' }}>
+                                            <span style={{ fontSize: 12, fontFamily: 'monospace', color: T.purple }}>{client.usage?.tokens_consumed ? `${(client.usage.tokens_consumed / 1000).toFixed(1)}k` : '0'}</span>
                                         </td>
-                                        <td className="px-6 py-4">
+                                        <td style={{ padding: '14px 24px' }}>
                                             {client.bots?.length > 0 ? (
-                                                <div className="flex flex-col gap-1.5">
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                                                     {client.bots.map((b: any) => (
-                                                        <button
-                                                            key={b.instance_id}
-                                                            onClick={() => fetchBotDetails(b.instance_id)}
-                                                            className={`text-[11px] flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all cursor-pointer hover:ring-1 hover:ring-blue-500/50 ${expandedBot === b.instance_id ? 'bg-blue-950/50 ring-1 ring-blue-500/30' : 'bg-slate-800/80'}`}
-                                                        >
-                                                            <div className={`w-2 h-2 rounded-full ${b.status === 'online' ? 'bg-emerald-500 shadow-emerald-500/50 shadow-sm' : 'bg-red-500'}`} />
-                                                            <span className="truncate max-w-[100px]" title={b.company_name}>{b.company_name}</span>
-
-                                                            {/* Health Score Badge */}
-                                                            <span className={`ml-auto text-[9px] font-bold ${getHealthColor(b.health_score ?? 100)}`}>
-                                                                {b.health_score ?? 100}
-                                                            </span>
-
-                                                            {b.last_error && <AlertTriangle size={10} className="text-red-400 ml-1" />}
-
+                                                        <button key={b.instance_id} onClick={() => fetchBotDetails(b.instance_id)}
+                                                            style={{ ...glassCard({ borderRadius: 10, padding: '6px 12px', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', gap: 8, color: T.text, transition: 'all 0.2s',
+                                                                ...(expandedBot === b.instance_id ? { background: `rgba(0,119,134,0.15)`, borderColor: T.accent } : {}) }) }}>
+                                                            <div style={{ width: 7, height: 7, borderRadius: '50%', background: b.status === 'online' ? T.success : T.danger, boxShadow: b.status === 'online' ? `0 0 6px ${T.success}` : 'none' }} />
+                                                            <span style={{ maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{b.company_name}</span>
+                                                            <span style={{ marginLeft: 'auto', fontSize: 9, fontWeight: 700, color: (b.health_score ?? 100) >= 80 ? T.success : (b.health_score ?? 100) >= 50 ? T.warning : T.danger }}>{b.health_score ?? 100}</span>
+                                                            {b.last_error && <AlertTriangle size={10} style={{ color: T.danger }} />}
                                                             {expandedBot === b.instance_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                                                         </button>
                                                     ))}
                                                 </div>
-                                            ) : (
-                                                <span className="text-xs text-slate-500 italic">Sin bots</span>
-                                            )}
+                                            ) : <span style={{ fontSize: 12, color: T.textDim, fontStyle: 'italic' }}>Sin bots</span>}
                                         </td>
                                     </tr>
-
-                                    {/* Expanded Bot Details Row */}
-                                    {client.bots?.map((b: any) => (
-                                        expandedBot === b.instance_id && (
-                                            <tr key={`details-${b.instance_id}`}>
-                                                <td colSpan={5} className="p-0">
-                                                    <div className="bg-slate-950 border-t border-b border-blue-900/30 p-6">
-                                                        {loadingDetails ? (
-                                                            <div className="text-center text-slate-400 py-4">Cargando detalles...</div>
-                                                        ) : botDetails ? (
-                                                            <div className="space-y-6">
-                                                                {/* Bot Header */}
-                                                                <div className="flex items-center justify-between">
-                                                                    <div className="flex items-center gap-4">
-                                                                        <div>
-                                                                            <h4 className="text-lg font-bold">{botDetails.company_name}</h4>
-                                                                            <p className="text-xs text-slate-500 font-mono">{botDetails.instance_id}</p>
-                                                                        </div>
-                                                                        {/* Health Score Circle */}
-                                                                        <div className="flex items-center gap-2">
-                                                                            <Heart size={14} className={getHealthColor(botDetails.health_score)} />
-                                                                            <div className="relative w-12 h-12">
-                                                                                <svg className="w-12 h-12 -rotate-90" viewBox="0 0 36 36">
-                                                                                    <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#1e293b" strokeWidth="3" />
-                                                                                    <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" className={`${getHealthBg(botDetails.health_score).replace('bg-', 'stroke-')}`} strokeWidth="3" strokeDasharray={`${botDetails.health_score}, 100`} />
-                                                                                </svg>
-                                                                                <span className={`absolute inset-0 flex items-center justify-center text-xs font-bold ${getHealthColor(botDetails.health_score)}`}>{botDetails.health_score}</span>
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
-                                                                    {/* Actions */}
-                                                                    <div className="flex gap-2">
-                                                                        <button
-                                                                            onClick={() => executeBotAction(b.instance_id, 'reconnect')}
-                                                                            disabled={actionLoading === `${b.instance_id}_reconnect`}
-                                                                            className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                                                                        >
-                                                                            <RefreshCw size={12} className={actionLoading === `${b.instance_id}_reconnect` ? 'animate-spin' : ''} /> Reconectar
-                                                                        </button>
-                                                                        <button
-                                                                            onClick={() => executeBotAction(b.instance_id, 'disconnect')}
-                                                                            disabled={actionLoading === `${b.instance_id}_disconnect`}
-                                                                            className="bg-yellow-600/20 hover:bg-yellow-600/30 text-yellow-400 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                                                                        >
-                                                                            <Power size={12} /> Desconectar
-                                                                        </button>
-                                                                        <button
-                                                                            onClick={() => executeBotAction(b.instance_id, 'delete')}
-                                                                            disabled={actionLoading === `${b.instance_id}_delete`}
-                                                                            className="bg-red-600/20 hover:bg-red-600/30 text-red-400 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                                                                        >
-                                                                            <Trash2 size={12} /> Eliminar
-                                                                        </button>
+                                    {/* Expanded Bot Details */}
+                                    {client.bots?.map((b: any) => expandedBot === b.instance_id && (
+                                        <tr key={`det-${b.instance_id}`}>
+                                            <td colSpan={5} style={{ padding: 0 }}>
+                                                <div style={{ background: 'rgba(0,119,134,0.05)', borderTop: `1px solid ${T.glassBorder}`, borderBottom: `1px solid ${T.glassBorder}`, padding: 24 }}>
+                                                    {loadingDetails ? <div style={{ textAlign: 'center', color: T.textMuted, padding: 16 }}>Cargando detalles...</div> : botDetails ? (
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+                                                            {/* Bot Header */}
+                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                                                                    <div><h4 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{botDetails.company_name}</h4><p style={{ margin: 0, fontSize: 11, color: T.textDim, fontFamily: 'monospace' }}>{botDetails.instance_id}</p></div>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                                        <Heart size={14} style={{ color: (botDetails.health_score ?? 100) >= 80 ? T.success : T.danger }} />
+                                                                        <span style={{ fontSize: 20, fontWeight: 800, color: (botDetails.health_score ?? 100) >= 80 ? T.success : (botDetails.health_score ?? 100) >= 50 ? T.warning : T.danger }}>{botDetails.health_score ?? 100}</span>
                                                                     </div>
                                                                 </div>
-
-                                                                {/* Status Badges */}
-                                                                <div className="flex gap-3 flex-wrap">
-                                                                    <StatusBadge label="Estado" value={botDetails.status} color={botDetails.status === 'online' ? 'emerald' : 'red'} />
-                                                                    <StatusBadge label="Reconexiones" value={botDetails.reconnect_attempts} color={botDetails.reconnect_attempts > 0 ? 'yellow' : 'slate'} />
-                                                                    <StatusBadge label="Errores" value={botDetails.error_count} color={botDetails.error_count > 0 ? 'red' : 'slate'} />
-                                                                    <StatusBadge label="Warnings" value={botDetails.warn_count} color={botDetails.warn_count > 0 ? 'yellow' : 'slate'} />
-                                                                </div>
-
-                                                                {/* AI Usage by Model */}
-                                                                <div>
-                                                                    <h5 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-3 flex items-center gap-2"><Cpu size={14} /> Consumo por Modelo de IA</h5>
-                                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                                                        <AiModelCard
-                                                                            name="Gemini"
-                                                                            color="blue"
-                                                                            count={botDetails.ai_usage?.gemini?.count || 0}
-                                                                            tokens={botDetails.ai_usage?.gemini?.tokens || 0}
-                                                                            cost={botDetails.estimated_costs?.gemini || 0}
-                                                                        />
-                                                                        <AiModelCard
-                                                                            name="OpenAI"
-                                                                            color="emerald"
-                                                                            count={botDetails.ai_usage?.openai?.count || 0}
-                                                                            tokens={botDetails.ai_usage?.openai?.tokens || 0}
-                                                                            cost={botDetails.estimated_costs?.openai || 0}
-                                                                        />
-                                                                        <AiModelCard
-                                                                            name="DeepSeek"
-                                                                            color="purple"
-                                                                            count={botDetails.ai_usage?.deepseek?.count || 0}
-                                                                            tokens={botDetails.ai_usage?.deepseek?.tokens || 0}
-                                                                            cost={botDetails.estimated_costs?.deepseek || 0}
-                                                                        />
-                                                                    </div>
-                                                                </div>
-
-                                                                {/* Event Logs */}
-                                                                <div>
-                                                                    <h5 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-3 flex items-center gap-2"><Activity size={14} /> Últimos Eventos</h5>
-                                                                    <div className="max-h-64 overflow-y-auto space-y-1.5 pr-2 custom-scrollbar">
-                                                                        {botDetails.logs?.length > 0 ? (
-                                                                            [...botDetails.logs].reverse().map((log: any, idx: number) => (
-                                                                                <div key={idx} className={`flex items-start gap-2 px-3 py-2 rounded-lg border text-[11px] ${getLevelBg(log.level)}`}>
-                                                                                    {getLevelIcon(log.level)}
-                                                                                    <span className="text-slate-500 font-mono whitespace-nowrap">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                                                                                    <span className="text-slate-300 flex-1">{log.message}</span>
-                                                                                    {log.meta && Object.keys(log.meta).length > 0 && (
-                                                                                        <span className="text-slate-600 font-mono text-[9px]">{JSON.stringify(log.meta)}</span>
-                                                                                    )}
-                                                                                </div>
-                                                                            ))
-                                                                        ) : (
-                                                                            <p className="text-slate-500 text-xs italic py-4 text-center">Sin eventos registrados aún. Los logs se generan en tiempo real.</p>
-                                                                        )}
-                                                                    </div>
+                                                                <div style={{ display: 'flex', gap: 8 }}>
+                                                                    {[
+                                                                        { action: 'reconnect', icon: <RefreshCw size={12} />, label: 'Reconectar', bg: 'rgba(16,185,129,0.15)', color: T.success },
+                                                                        { action: 'disconnect', icon: <Power size={12} />, label: 'Desconectar', bg: 'rgba(245,158,11,0.15)', color: T.warning },
+                                                                        { action: 'delete', icon: <Trash2 size={12} />, label: 'Eliminar', bg: 'rgba(239,68,68,0.15)', color: T.danger },
+                                                                    ].map(a => (
+                                                                        <button key={a.action} onClick={() => executeBotAction(b.instance_id, a.action)} disabled={actionLoading === `${b.instance_id}_${a.action}`}
+                                                                            style={{ background: a.bg, color: a.color, border: 'none', borderRadius: 10, padding: '6px 14px', fontSize: 12, fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, transition: 'opacity 0.2s', opacity: actionLoading === `${b.instance_id}_${a.action}` ? 0.5 : 1 }}>
+                                                                            {a.icon} {a.label}
+                                                                        </button>
+                                                                    ))}
                                                                 </div>
                                                             </div>
-                                                        ) : (
-                                                            <div className="text-center text-slate-500 py-4">No se pudieron cargar los detalles.</div>
-                                                        )}
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        )
+                                                            {/* AI Usage */}
+                                                            <div>
+                                                                <h5 style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 2, color: T.textDim, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}><Cpu size={13} /> Consumo por Modelo</h5>
+                                                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                                                                    {[
+                                                                        { name: 'Gemini', color: T.accentLight, data: botDetails.ai_usage?.gemini, cost: botDetails.estimated_costs?.gemini },
+                                                                        { name: 'OpenAI', color: T.success, data: botDetails.ai_usage?.openai, cost: botDetails.estimated_costs?.openai },
+                                                                        { name: 'DeepSeek', color: T.purple, data: botDetails.ai_usage?.deepseek, cost: botDetails.estimated_costs?.deepseek },
+                                                                    ].map(m => (
+                                                                        <div key={m.name} style={glassCard({ padding: 14 })}>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Zap size={13} style={{ color: m.color }} /><span style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{m.name}</span></div>
+                                                                            {[['Llamadas', m.data?.count || 0], ['Tokens', (m.data?.tokens || 0) > 1000 ? `${((m.data?.tokens || 0) / 1000).toFixed(1)}k` : m.data?.tokens || 0], ['Costo', `$${(m.cost || 0).toFixed(4)}`]].map(([l, v]) => (
+                                                                                <div key={l as string} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4 }}><span style={{ color: T.textDim }}>{l}</span><span style={{ fontFamily: 'monospace', color: T.text }}>{v}</span></div>
+                                                                            ))}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                            {/* Event Logs */}
+                                                            <div>
+                                                                <h5 style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 2, color: T.textDim, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}><Activity size={13} /> Últimos Eventos</h5>
+                                                                <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                                    {botDetails.logs?.length > 0 ? [...botDetails.logs].reverse().map((log: any, idx: number) => (
+                                                                        <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 12px', borderRadius: 10, fontSize: 11, background: log.level === 'error' ? 'rgba(239,68,68,0.08)' : log.level === 'warn' ? 'rgba(245,158,11,0.06)' : 'rgba(255,255,255,0.02)', border: `1px solid ${log.level === 'error' ? 'rgba(239,68,68,0.2)' : log.level === 'warn' ? 'rgba(245,158,11,0.15)' : 'rgba(255,255,255,0.05)'}` }}>
+                                                                            {log.level === 'error' ? <AlertTriangle size={11} style={{ color: T.danger }} /> : log.level === 'warn' ? <AlertTriangle size={11} style={{ color: T.warning }} /> : <Info size={11} style={{ color: T.accentLight }} />}
+                                                                            <span style={{ color: T.textDim, fontFamily: 'monospace', whiteSpace: 'nowrap' as const }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                                                                            <span style={{ flex: 1, color: T.text }}>{log.message}</span>
+                                                                        </div>
+                                                                    )) : <p style={{ color: T.textDim, fontSize: 12, textAlign: 'center', fontStyle: 'italic', padding: 16 }}>Sin eventos registrados aún.</p>}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ) : <div style={{ textAlign: 'center', color: T.textDim, padding: 16 }}>No se pudieron cargar los detalles.</div>}
+                                                </div>
+                                            </td>
+                                        </tr>
                                     ))}
                                 </React.Fragment>
                             ))}
                         </tbody>
                     </table>
-                    {filteredClients.length === 0 && <p className="text-center p-8 text-slate-500 italic">No se encontraron clientes.</p>}
+                    {filteredClients.length === 0 && <p style={{ textAlign: 'center', padding: 32, color: T.textDim, fontStyle: 'italic' }}>No se encontraron clientes.</p>}
                 </div>
             </section>
+
+            {/* CSS Animations */}
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
     );
 };
 
 // --- Sub-components ---
-
-const MetricCard = ({ title, value, icon, accent }: any) => (
-    <div className={`bg-slate-950 border ${accent === 'red' ? 'border-red-900/50' : 'border-slate-800'} p-5 rounded-2xl shadow-xl hover:border-slate-700 transition-all`}>
-        <div className="flex items-center gap-3 mb-3">
-            <div className="p-2 bg-slate-900 rounded-xl">{icon}</div>
+const MetricCard = ({ icon, title, value, color, accent }: any) => (
+    <div style={{ ...glassCard({ padding: '20px 18px', transition: 'all 0.25s', cursor: 'default', ...(accent ? { borderColor: `rgba(239,68,68,0.3)` } : {}) }) }}
+        onMouseEnter={e => { e.currentTarget.style.background = T.glassHover; e.currentTarget.style.transform = 'translateY(-2px)'; }}
+        onMouseLeave={e => { e.currentTarget.style.background = T.glass; e.currentTarget.style.transform = 'translateY(0)'; }}>
+        <div style={{ marginBottom: 14 }}>
+            <div style={{ width: 36, height: 36, borderRadius: 10, background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>{icon}</div>
         </div>
-        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-0.5">{title}</p>
-        <h4 className={`text-xl font-bold ${accent === 'red' && Number(value) > 0 ? 'text-red-400' : 'text-white'}`}>{value}</h4>
-    </div>
-);
-
-const StatusBadge = ({ label, value, color }: any) => (
-    <div className={`bg-${color}-500/10 border border-${color}-500/20 px-3 py-1.5 rounded-lg`}>
-        <span className="text-[9px] text-slate-500 uppercase tracking-wider block">{label}</span>
-        <span className={`text-sm font-bold text-${color}-400`}>{value}</span>
-    </div>
-);
-
-const AiModelCard = ({ name, color, count, tokens, cost }: any) => (
-    <div className={`bg-slate-900/50 border border-slate-800 rounded-xl p-4`}>
-        <div className="flex items-center gap-2 mb-2">
-            <Zap size={14} className={`text-${color}-400`} />
-            <span className="text-xs font-bold text-slate-300">{name}</span>
-        </div>
-        <div className="space-y-1">
-            <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">Llamadas</span>
-                <span className="text-slate-300 font-mono">{count}</span>
-            </div>
-            <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">Tokens</span>
-                <span className="text-slate-300 font-mono">{tokens > 1000 ? `${(tokens / 1000).toFixed(1)}k` : tokens}</span>
-            </div>
-            <div className="flex justify-between text-[11px]">
-                <span className="text-slate-500">Costo est.</span>
-                <span className={`font-mono ${cost > 0 ? 'text-yellow-400' : 'text-slate-500'}`}>${cost.toFixed(4)}</span>
-            </div>
-        </div>
+        <p style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 2, color: T.textDim, margin: '0 0 4px' }}>{title}</p>
+        <h4 style={{ fontSize: 22, fontWeight: 800, margin: 0, color: accent ? T.danger : '#fff' }}>{value}</h4>
     </div>
 );
 
 const HealthPanel = ({ title, icon, metrics }: any) => (
-    <div className="bg-slate-950/40 border border-slate-800/50 rounded-2xl p-4">
-        <div className="flex items-center gap-2 mb-4 text-slate-300">
-            <div className="p-1.5 bg-slate-800 rounded-lg">{icon}</div>
-            <h4 className="text-xs font-bold uppercase tracking-wider">{title}</h4>
+    <div style={glassCard({ padding: 18 })}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: T.text }}>
+            <div style={{ padding: 6, borderRadius: 8, background: 'rgba(255,255,255,0.06)' }}>{icon}</div>
+            <h4 style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 2, margin: 0 }}>{title}</h4>
         </div>
-        <div className="space-y-3">
-            {metrics.map((m: any, idx: number) => (
-                <div key={idx} className="flex justify-between items-center">
-                    <span className="text-[11px] text-slate-500 font-medium">{m.label}</span>
-                    <div className="flex items-baseline gap-1">
-                        <span className={`text-sm font-mono font-bold ${m.bad ? 'text-red-500' : m.warn ? 'text-yellow-500' : 'text-slate-200'}`}>
-                            {m.value}
-                        </span>
-                        <span className="text-[9px] text-slate-600 uppercase">{m.unit}</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {metrics.map((m: any, i: number) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, color: T.textMuted, fontWeight: 500 }}>{m.label}</span>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+                        <span style={{ fontSize: 15, fontFamily: 'monospace', fontWeight: 700, color: m.bad ? T.danger : m.warn ? T.warning : T.text }}>{m.value}</span>
+                        <span style={{ fontSize: 9, textTransform: 'uppercase', color: T.textDim }}>{m.unit}</span>
                     </div>
                 </div>
             ))}

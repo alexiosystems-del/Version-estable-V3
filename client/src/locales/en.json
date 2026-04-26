@@ -4,13 +4,13 @@
         "connect": "Connect WhatsApp",
         "connected": "Connected as",
         "disconnect": "Disconnect",
-        "botConfig": "Bot Configuration",
+        "botConfig": "Advisor Configuration",
         "refresh": "Refresh",
         "saving": "Saving...",
         "saveConfig": "Save Configuration",
         "saved": "Saved successfully!",
-        "myBots": "My Bots",
-        "createNewBot": "Add New Bot",
+        "myBots": "Digital Advisors",
+        "createNewBot": "Add New Advisor",
         "connectedAs": "Online via"
     }
 }

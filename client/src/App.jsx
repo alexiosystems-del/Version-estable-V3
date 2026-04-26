@@ -11,6 +11,10 @@ const PaymentSetup = lazy(() => import('./components/PaymentSetup'));
 const SaasDashboard = lazy(() => import('./components/SaasDashboard'));
 const SuperAdminDashboard = lazy(() => import('./components/SuperAdminDashboard'));
 const SuperAdminLogin = lazy(() => import('./components/SuperAdminLogin'));
+const MemoryManager = lazy(() => import('./components/MemoryManager'));
+
+// Componente WebChat de prueba
+import WebChatWidget from './components/WebChatWidget';
 
 if (import.meta.env.DEV) {
   console.log('📦 [ALEX IO] App loaded in development mode');
@@ -20,7 +24,7 @@ const FullPageLoader = ({ label = 'CARGANDO ALEX IO...' }) => (
   <div
     style={{
       minHeight: '100vh',
-      background: '#0f172a',
+      background: '#050510',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
@@ -32,13 +36,13 @@ const FullPageLoader = ({ label = 'CARGANDO ALEX IO...' }) => (
       style={{
         width: 48,
         height: 48,
-        border: '4px solid #3b82f6',
-        borderTopColor: 'transparent',
+        border: '3px solid rgba(6, 182, 212, 0.2)',
+        borderTopColor: '#06b6d4',
         borderRadius: '50%',
         animation: 'spin 1s linear infinite',
       }}
     />
-    <p style={{ marginTop: 16, color: '#94a3b8', fontSize: 12, letterSpacing: 2 }}>{label}</p>
+    <p style={{ marginTop: 16, color: 'rgba(255,255,255,0.25)', fontSize: 11, letterSpacing: 3, fontWeight: 600 }}>{label}</p>
     <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
   </div>
 );
@@ -144,27 +148,33 @@ function App() {
     return <FullPageLoader label="CARGANDO ALEX IO..." />;
   }
 
+  const backendToken = localStorage.getItem('alex_io_token') || sessionStorage.getItem('alex_io_token');
+  const isDemoMode = localStorage.getItem('demo_mode') === 'true';
+  const isAuthenticated = isDemoMode ? !!session : (!!session && !!backendToken);
+
   const ProtectedRoute = ({ children }) => {
-    if (!session) return <Navigate to="/login" />;
+    if (!isAuthenticated) return <Navigate to="/login" />;
     return children;
   };
 
   const RoleRoute = ({ children, allowedRoles }) => {
     const role = session?.user?.role || localStorage.getItem('alex_io_role') || 'OWNER';
-    if (!session && role !== 'SUPERADMIN') return <Navigate to="/login" />;
+    // STRICT SECURITY FIX: Si no está autenticado, no importa qué rol tenga en LocalStorage, debe ir a login
+    // Demo mode bypasses this if handled specifically by session hydration above
+    if (!isAuthenticated) return <Navigate to="/login" />;
     if (!allowedRoles.includes(role)) return <Navigate to="/dashboard" />;
     return children;
   };
 
-  const defaultPath = session?.user?.role === 'SUPERADMIN' ? '/superadmin' : '/dashboard';
+  const defaultPath = (localStorage.getItem('alex_io_role') || session?.user?.role) === 'SUPERADMIN' ? '/superadmin' : '/dashboard';
 
   return (
     <AuthProvider>
       <Router>
-        <div className="min-h-screen bg-black selection:bg-blue-500/30">
+        <div className="min-h-screen selection:bg-cyan-500/30" style={{ background: '#050510' }}>
           <Suspense fallback={<FullPageLoader />}>
             <Routes>
-              <Route path="/login" element={!session ? <Login /> : <Navigate to={defaultPath} />} />
+              <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to={defaultPath} />} />
               <Route path="/superadmin-login" element={<SuperAdminLogin />} />
 
               <Route
@@ -194,12 +204,23 @@ function App() {
                 }
               />
 
-              <Route path="/saas" element={<SaasDashboard />} />
+              <Route
+                path="/saas"
+                element={<Navigate to="/dashboard" replace />}
+              />
               <Route
                 path="/payment-setup"
                 element={
                   <ProtectedRoute>
                     <PaymentSetup />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/memories"
+                element={
+                  <ProtectedRoute>
+                    <MemoryManager />
                   </ProtectedRoute>
                 }
               />
@@ -215,6 +236,7 @@ function App() {
               <Route path="/" element={<LandingPage />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>
+            <WebChatWidget apiUrl={import.meta.env.VITE_API_URL || ''} tenantId="demo-testing" />
           </Suspense>
         </div>
       </Router>

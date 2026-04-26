@@ -1,18 +1,19 @@
 import React, { useEffect, useMemo, useState, Component } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Shield, Activity, Settings, Smartphone, Plus, Loader, AlertTriangle, CheckCircle2, X, Wand2, LogOut, MessageCircle, Send, Globe, Book, Sparkles, Sun, Moon } from 'lucide-react';
+import { Shield, Activity, Settings, Smartphone, Plus, PlusCircle, Loader, AlertTriangle, CheckCircle2, X, Wand2, LogOut, MessageCircle, MessageSquare, Send, Globe, Book, Sparkles, Sun, Moon, Trash2, PauseCircle, Play, RefreshCw, Zap } from 'lucide-react';
 import PromptWizard from './PromptWizard';
 import PromptCopilot from './PromptCopilot';
 import LiveChat from './LiveChat';
 import KnowledgeBase from './KnowledgeBase';
 import BroadcastCampaign from './BroadcastCampaign';
 import DataCompliance from './DataCompliance';
+import MemoryManager from './MemoryManager';
 import ConfigTab from './ConfigTab';
 import { fetchJsonWithApiFallback, getLastResolvedApiBase, getPreferredApiBase, getAuthHeaders } from '../api';
 import { supabase } from '../supabaseClient';
 
-const VERSION = 'v2.0.5.0';
+const VERSION = "v2.0.7.8-STABLE";
 
 // Inject DM Sans font
 if (typeof document !== 'undefined' && !document.getElementById('dm-sans-font')) {
@@ -26,29 +27,38 @@ if (typeof document !== 'undefined' && !document.getElementById('dm-sans-font'))
 // --- THEME SYSTEM ---
 const themes = {
   dark: {
-    bg: '#0e0e16', bgAlt: '#0a0a12', card: '#16161e', border: '#2a2a3a',
+    bg: '#050510', bgAlt: '#08081a', card: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.08)',
     text: '#e2e8f0', textMuted: '#64748b', textDim: '#94a3b8',
-    accent: '#6366f1', accentHover: '#818cf8', accentBg: 'rgba(99,102,241,0.15)', accentBorder: 'rgba(99,102,241,0.3)',
-    inputBg: '#0e0e16', inputBorder: '#2a2a3a',
-    modalBg: '#16161e', modalOverlay: 'rgba(0,0,0,0.8)',
-    footerBg: 'rgba(10,10,18,0.9)', footerBorder: '#1e1e2e',
+    accent: '#06b6d4', accentHover: '#22d3ee', accentBg: 'rgba(6,182,212,0.12)', accentBorder: 'rgba(6,182,212,0.25)',
+    inputBg: 'rgba(255,255,255,0.03)', inputBorder: 'rgba(255,255,255,0.08)',
+    modalBg: 'rgba(15,15,30,0.85)', modalOverlay: 'rgba(0,0,0,0.7)',
+    footerBg: 'rgba(5,5,16,0.8)', footerBorder: 'rgba(255,255,255,0.06)',
     noticeText: '#e2e8f0',
+    glass: 'backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);',
+    sidebarBg: 'rgba(8,8,20,0.6)',
   },
   light: {
-    bg: '#f8fafc', bgAlt: '#ffffff', card: '#ffffff', border: '#e2e8f0',
+    bg: '#f8fafc', bgAlt: '#ffffff', card: 'rgba(255,255,255,0.8)', border: 'rgba(0,0,0,0.08)',
     text: '#1e293b', textMuted: '#64748b', textDim: '#475569',
-    accent: '#6366f1', accentHover: '#4f46e5', accentBg: 'rgba(99,102,241,0.08)', accentBorder: 'rgba(99,102,241,0.25)',
-    inputBg: '#f1f5f9', inputBorder: '#cbd5e1',
-    modalBg: '#ffffff', modalOverlay: 'rgba(0,0,0,0.4)',
-    footerBg: 'rgba(255,255,255,0.95)', footerBorder: '#e2e8f0',
+    accent: '#06b6d4', accentHover: '#0891b2', accentBg: 'rgba(6,182,212,0.08)', accentBorder: 'rgba(6,182,212,0.25)',
+    inputBg: 'rgba(241,245,249,0.8)', inputBorder: 'rgba(0,0,0,0.1)',
+    modalBg: 'rgba(255,255,255,0.9)', modalOverlay: 'rgba(0,0,0,0.3)',
+    footerBg: 'rgba(255,255,255,0.85)', footerBorder: 'rgba(0,0,0,0.06)',
     noticeText: '#1e293b',
+    glass: 'backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);',
+    sidebarBg: 'rgba(255,255,255,0.6)',
   }
 };
 
 const PROVIDERS = [
-  { value: 'baileys', label: 'Baileys (QR)' },
-  { value: 'meta', label: 'Meta Cloud API' },
-  { value: '360dialog', label: '360Dialog' }
+  { value: 'baileys', label: 'WhatsApp: Baileys' },
+  { value: 'meta', label: 'WhatsApp: Meta Cloud' },
+  { value: 'messenger', label: 'Facebook: Messenger' },
+  { value: 'instagram', label: 'Instagram: Direct' },
+  { value: 'tiktok', label: 'TikTok: Business Messaging' },
+  { value: 'discord', label: 'Discord: Server Bot' },
+  { value: 'reddit', label: 'Reddit: Chat' },
+  { value: '360dialog', label: 'WhatsApp: 360Dialog' }
 ];
 
 // --- Error Boundary to prevent full page crashes ---
@@ -136,7 +146,22 @@ function SaasDashboard() {
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
   const [newBotName, setNewBotName] = useState('');
   const [newBotProvider, setNewBotProvider] = useState('baileys');
+  const [newBotCredentials, setNewBotCredentials] = useState({
+    metaPhoneNumberId: '',
+    metaAccessToken: '',
+    metaVerifyToken: '',
+    tiktokAccessToken: '',
+    tiktokSellerId: '',
+    discordToken: '',
+    discordGuildId: '',
+    redditClientId: '',
+    redditClientSecret: '',
+    redditUsername: '',
+    redditPassword: ''
+  });
   const [activeTab, setActiveTab] = useState('config'); // 'config' | 'chat'
+  const [botToDelete, setBotToDelete] = useState(null);
+  const [deletingBot, setDeletingBot] = useState(false);
 
   // Soporte AI Chat
   const [isSupportOpen, setIsSupportOpen] = useState(false);
@@ -154,6 +179,8 @@ function SaasDashboard() {
     metaApiUrl: '',
     metaPhoneNumberId: '',
     metaAccessToken: '',
+    manychatToken: '',
+    tiktokAccessToken: '',
     dialogApiKey: '',
     hubspotAccessToken: '',
     copperApiKey: '',
@@ -228,7 +255,7 @@ function SaasDashboard() {
         timeoutMs: 15000,
         headers: { ...getAuthHeaders() }
       });
-      if (response.ok && data.sessions) {
+      if (response.ok && Array.isArray(data.sessions)) {
         setInstances(data.sessions.map(s => ({
           ...s,
           id: s.instanceId || s.id,
@@ -274,6 +301,8 @@ function SaasDashboard() {
       metaApiUrl: selected.metaApiUrl || '',
       metaPhoneNumberId: selected.metaPhoneNumberId || '',
       metaAccessToken: selected.metaAccessToken || '',
+      manychatToken: selected.manychatToken || '',
+      tiktokAccessToken: selected.tiktokAccessToken || '',
       dialogApiKey: selected.dialogApiKey || '',
       hubspotAccessToken: selected.hubspotAccessToken || '',
       copperApiKey: selected.copperApiKey || '',
@@ -295,6 +324,26 @@ function SaasDashboard() {
       if (byStatus !== 0) return byStatus;
       return String(b.created_at || '').localeCompare(String(a.created_at || ''));
     });
+  };
+
+  const handleBotAction = async (instanceId, action) => {
+    if (!instanceId) return;
+    try {
+      const { response, data } = await fetchJsonWithApiFallback(`/api/saas/action/${instanceId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ action })
+      });
+
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || `Error al ${action === 'pause' ? 'pausar' : 'reanudar'}`);
+      }
+
+      pushNotice('success', `Bot ${action === 'pause' ? 'pausado' : 'reanudado'} correctamente.`);
+      setTimeout(fetchInstances, 1000);
+    } catch (error) {
+      pushNotice('error', error.message);
+    }
   };
 
   const handleRestartInstance = async () => {
@@ -320,6 +369,36 @@ function SaasDashboard() {
       setTimeout(fetchInstances, 2000);
     } catch (error) {
       pushNotice('error', error.message || 'Fallo al reiniciar.');
+    }
+  };
+
+  const handleDeleteBot = async () => {
+    if (!botToDelete?.instanceId || deletingBot) return;
+
+    setDeletingBot(true);
+    try {
+      const { response, data } = await fetchJsonWithApiFallback('/api/saas/disconnect', {
+        method: 'POST',
+        timeoutMs: 30000,
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ instanceId: botToDelete.instanceId })
+      });
+
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || 'No se pudo eliminar el bot.');
+      }
+
+      const deletedInstanceId = botToDelete.instanceId;
+      setInstances((prev) => prev.filter((inst) => (inst.instanceId || inst.id) !== deletedInstanceId));
+      setSelected((current) => ((current?.instanceId || current?.id) === deletedInstanceId ? null : current));
+      setBotToDelete(null);
+      pushNotice('success', 'Bot eliminado correctamente. Ya puedes crear uno nuevo.');
+      setActiveTab('config');
+      setTimeout(fetchInstances, 1000);
+    } catch (error) {
+      pushNotice('error', error.message || 'Fallo al eliminar el bot.');
+    } finally {
+      setDeletingBot(false);
     }
   };
 
@@ -380,9 +459,7 @@ function SaasDashboard() {
           companyName: name,
           customPrompt: `Eres un asistente virtual de ${name}`,
           provider,
-          metaApiUrl: '',
-          metaPhoneNumberId: '',
-          metaAccessToken: '',
+          ...newBotCredentials,
           dialogApiKey: ''
         })
       });
@@ -406,6 +483,8 @@ function SaasDashboard() {
         metaApiUrl: '',
         metaPhoneNumberId: '',
         metaAccessToken: '',
+        manychatToken: '',
+        tiktokAccessToken: '',
         dialogApiKey: '',
         hubspotAccessToken: '',
         copperApiKey: '',
@@ -558,7 +637,7 @@ function SaasDashboard() {
         <div className="fixed inset-0 flex items-center justify-center z-50 p-4" style={{ background: T.modalOverlay }}>
           <div className="rounded-xl p-6 w-full max-w-sm" style={{ background: T.card, border: `1px solid ${T.border}` }}>
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold">Nuevo Bot</h3>
+              <h3 className="text-lg font-bold">Nuevo Asesor Digital</h3>
               <button onClick={() => setShowNewBotModal(false)} className="text-slate-400 hover:text-white">
                 <X size={20} />
               </button>
@@ -577,7 +656,7 @@ function SaasDashboard() {
                 />
               </div>
               <div>
-                <label className="block text-sm mb-1" style={{ color: T.textMuted }}>Canal WhatsApp</label>
+                <label className="block text-sm mb-1" style={{ color: T.textMuted }}>Plataforma / Canal</label>
                 <select
                   className="w-full rounded p-2"
                   style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }}
@@ -587,12 +666,86 @@ function SaasDashboard() {
                   {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
                 </select>
               </div>
+
+              {/* Dynamic Credentials Fields */}
+              {(newBotProvider === 'meta' || newBotProvider === 'whatsapp_cloud') && (
+                <div className="space-y-3 p-3 rounded-lg bg-indigo-500/5 border border-indigo-500/20">
+                  <p className="text-[10px] uppercase font-bold text-indigo-400">Credenciales Meta Cloud</p>
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Phone Number ID" value={newBotCredentials.metaPhoneNumberId} onChange={e => setNewBotCredentials({...newBotCredentials, metaPhoneNumberId: e.target.value})} />
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Access Token (Permanent)" value={newBotCredentials.metaAccessToken} onChange={e => setNewBotCredentials({...newBotCredentials, metaAccessToken: e.target.value})} />
+                </div>
+              )}
+
+              {newBotProvider === 'tiktok' && (
+                <div className="space-y-3 p-3 rounded-lg bg-pink-500/5 border border-pink-500/20">
+                  <p className="text-[10px] uppercase font-bold text-pink-400">Credenciales TikTok</p>
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Seller ID" value={newBotCredentials.tiktokSellerId} onChange={e => setNewBotCredentials({...newBotCredentials, tiktokSellerId: e.target.value})} />
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Access Token" value={newBotCredentials.tiktokAccessToken} onChange={e => setNewBotCredentials({...newBotCredentials, tiktokAccessToken: e.target.value})} />
+                </div>
+              )}
+
+              {newBotProvider === 'discord' && (
+                <div className="space-y-3 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20">
+                  <p className="text-[10px] uppercase font-bold text-blue-400">Credenciales Discord</p>
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Bot Token" value={newBotCredentials.discordToken} onChange={e => setNewBotCredentials({...newBotCredentials, discordToken: e.target.value})} />
+                </div>
+              )}
+
+              {newBotProvider === 'reddit' && (
+                <div className="space-y-3 p-3 rounded-lg bg-orange-500/5 border border-orange-500/20">
+                  <p className="text-[10px] uppercase font-bold text-orange-400">Credenciales Reddit</p>
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Username" value={newBotCredentials.redditUsername} onChange={e => setNewBotCredentials({...newBotCredentials, redditUsername: e.target.value})} />
+                  <input className="w-full rounded p-2 text-xs" style={{ background: T.inputBg, border: `1px solid ${T.inputBorder}`, color: T.text }} placeholder="Password" type="password" value={newBotCredentials.redditPassword} onChange={e => setNewBotCredentials({...newBotCredentials, redditPassword: e.target.value})} />
+                </div>
+              )}
               <button
                 onClick={handleCreateNew}
                 disabled={!newBotName.trim()}
                 className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-lg disabled:opacity-50"
               >
                 Crear Bot
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {botToDelete && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 p-4" style={{ background: T.modalOverlay }}>
+          <div className="rounded-xl p-6 w-full max-w-md" style={{ background: T.card, border: `1px solid ${T.border}` }}>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="p-2 rounded-lg bg-red-500/10 text-red-400">
+                <Trash2 size={18} />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold">Eliminar bot</h3>
+                <p className="text-sm mt-1" style={{ color: T.textMuted }}>
+                  Vas a borrar <strong style={{ color: T.text }}>{botToDelete.name}</strong> y su sesión activa.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg p-3 mb-5 text-sm" style={{ background: T.bgAlt, border: `1px solid ${T.border}`, color: T.textMuted }}>
+              Esto también limpiará la sesión persistente y los datos operativos asociados para que puedas crear un bot nuevo sin arrastrar residuos del anterior.
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setBotToDelete(null)}
+                disabled={deletingBot}
+                className="flex-1 py-2.5 rounded-lg font-bold transition-colors"
+                style={{ background: T.inputBg, border: `1px solid ${T.border}`, color: T.text }}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleDeleteBot}
+                disabled={deletingBot}
+                className="flex-1 py-2.5 rounded-lg font-bold text-white transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+                style={{ background: 'linear-gradient(135deg, #dc2626, #ef4444)' }}
+              >
+                {deletingBot ? <Loader size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                {deletingBot ? 'Eliminando...' : 'Sí, eliminar'}
               </button>
             </div>
           </div>
@@ -677,7 +830,7 @@ function SaasDashboard() {
             </p>
           </div>
 
-          <h2 className="text-xs font-bold uppercase tracking-widest mb-4" style={{ color: T.textMuted }}>{t('dashboard.myBots', 'Mis Bots')}</h2>
+          <h2 className="text-xs font-bold uppercase tracking-widest mb-4" style={{ color: T.textMuted }}>{t('dashboard.myBots', 'Asesores Digitales')}</h2>
           <div className="space-y-2 flex-1 overflow-auto">
             {instances.map((inst) => (
               <button key={inst.id} onClick={() => setSelected(inst)} className="w-full text-left p-3 rounded-xl flex items-center justify-between transition-all"
@@ -696,26 +849,91 @@ function SaasDashboard() {
               </button>
             ))}
           </div>
-          <button
-            onClick={() => setShowNewBotModal(true)}
-            className="w-full mt-4 py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all hover:scale-[1.02]"
-            style={{ background: T.card, border: `1px solid ${T.border}`, color: T.textDim }}
-          >
-            <Plus size={20} /> {t('dashboard.createNewBot', 'Añadir Nuevo')}
+          <button onClick={() => setShowNewBotModal(true)} className="w-full mt-4 py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all hover:scale-[1.02]" style={{ background: T.card, border: `1px solid ${T.border}`, color: T.textDim }}>
+            <PlusCircle size={20} /> {t('dashboard.createNewBot', 'Añadir Nuevo Asesor')}
           </button>
         </aside>
 
         <div className="flex-1 p-6 overflow-hidden flex flex-col">
           {selected ? (
             <div className="flex flex-col h-full w-full max-w-7xl mx-auto">
+              {/* Bot Header */}
+              <div className="flex items-center justify-between gap-4 mb-2">
+                <div>
+                  <h2 className="text-xl font-bold" style={{ color: T.text }}>{selected.name}</h2>
+                  <p className="text-sm flex items-center gap-2" style={{ color: T.textMuted }}>
+                    {providerLabel} · Estado: {selected.status || 'desconocido'}
+                    {selected.paused && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/30">PAUSADO</span>
+                    )}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setBotToDelete(selected)}
+                  className="px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2 transition-all hover:scale-[1.02]"
+                  style={{ background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', color: '#f87171' }}
+                >
+                  <Trash2 size={16} />
+                  Eliminar Bot
+                </button>
+              </div>
+
+              {/* Action Toolbar - always visible, wraps on small screens */}
+              <div className="flex flex-wrap items-center gap-2 mb-4 p-2 rounded-lg" style={{ background: T.bgAlt, border: `1px solid ${T.border}` }}>
+                <button
+                  onClick={() => handleBotAction(selected.instanceId, selected.paused ? 'resume' : 'pause')}
+                  className="px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all hover:scale-[1.02]"
+                  style={{ background: T.card, border: `1px solid ${T.border}`, color: selected.paused ? T.accent : T.textDim }}
+                >
+                  {selected.paused ? <Play size={14} /> : <PauseCircle size={14} />}
+                  {selected.paused ? 'Reanudar' : 'Pausar'}
+                </button>
+                <button
+                  onClick={handleRestartInstance}
+                  className="px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all hover:scale-[1.02]"
+                  style={{ background: T.card, border: `1px solid ${T.border}`, color: '#f59e0b' }}
+                >
+                  <Zap size={14} />
+                  Nuevo QR
+                </button>
+                <button
+                  onClick={() => handleBotAction(selected.instanceId, 'reconnect')}
+                  className="px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all hover:scale-[1.02]"
+                  style={{ background: T.card, border: `1px solid ${T.border}`, color: T.textDim }}
+                >
+                  <RefreshCw size={14} />
+                  Reconectar
+                </button>
+                <button
+                  onClick={async () => {
+                    try {
+                      const { response, data } = await fetchJsonWithApiFallback(`/api/saas/test-sync/${selected.instanceId}`, {
+                        method: 'POST',
+                        headers: { ...getAuthHeaders() }
+                      });
+                      if (response.ok) pushNotice('success', data.message);
+                      else throw new Error(data.error);
+                    } catch (e) {
+                       pushNotice('error', e.message);
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 transition-all hover:scale-[1.02]"
+                  style={{ background: T.card, border: `1px solid ${T.border}`, color: '#6366f1' }}
+                >
+                  <Activity size={14} />
+                  Test HubSpot
+                </button>
+              </div>
+
               {/* Tabs */}
               <div className="flex gap-1 mb-4 pb-2 flex-shrink-0 overflow-x-auto" style={{ borderBottom: `1px solid ${T.border}` }}>
                 {[
                   { key: 'config', icon: <Settings size={15} />, label: 'Configuración', color: '#6366f1' },
-                  { key: 'rag', icon: <Book size={15} />, label: 'Conocimiento', color: '#6366f1' },
-                  { key: 'chat', icon: <MessageCircle size={15} />, label: 'Live Chat', color: '#6366f1' },
+                  { key: 'rag', icon: <Book size={15} />, label: 'Protocolos Clínicos', color: '#6366f1' },
+                  { key: 'chat', icon: <MessageSquare size={15} />, label: 'Chat de Pacientes', color: '#6366f1' },
                   { key: 'broadcast', icon: <Send size={15} />, label: 'Campañas', color: '#a855f7' },
                   { key: 'compliance', icon: <Shield size={15} />, label: 'Auditoría', color: '#06b6d4' },
+                  { key: 'memories', icon: <Sparkles size={15} />, label: 'Memoria Larga', color: '#f59e0b' },
                 ].map(tab => (
                   <button key={tab.key} onClick={() => setActiveTab(tab.key)}
                     className="font-bold pb-2 px-3 border-b-2 transition-all flex items-center gap-2 text-sm whitespace-nowrap"
@@ -755,6 +973,10 @@ function SaasDashboard() {
               ) : activeTab === 'compliance' ? (
                 <div className="flex-1 overflow-hidden">
                   <DataCompliance instanceId={selected.instanceId || selected.id} tenantId={userTenant} />
+                </div>
+              ) : activeTab === 'memories' ? (
+                <div className="flex-1 overflow-y-auto">
+                  <MemoryManager />
                 </div>
               ) : null}
             </div>

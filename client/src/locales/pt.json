@@ -4,13 +4,13 @@
         "connect": "Conectar WhatsApp",
         "connected": "Conectado como",
         "disconnect": "Desconectar",
-        "botConfig": "Configuração do Bot",
+        "botConfig": "Configuração do Assessor",
         "refresh": "Atualizar",
         "saving": "Salvando...",
         "saveConfig": "Salvar Configuração",
         "saved": "Salvo com sucesso!",
-        "myBots": "Meus Bots",
-        "createNewBot": "Adicionar Novo",
+        "myBots": "Assessores Digitais",
+        "createNewBot": "Adicionar Novo Assessor",
         "connectedAs": "Online via"
     }
 }

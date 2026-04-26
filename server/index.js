@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('./utils/envValidator').validateEnv(); // FASE 0: Asegura que haya secrets
 const express = require('express');
 const cors = require('cors');
 const pino = require('pino');
@@ -8,16 +9,30 @@ const helmet = require('helmet');
 const app = express();
 app.set('trust proxy', 1); // Trust Render's load balancer (1 hop)
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 logger.info('✅ Express trust proxy enabled');
 
 // --- SECURITY MIDDLEWARES ---
 const rateLimit = require('express-rate-limit');
+const RedisStore = require('rate-limit-redis').default;
 const { authenticateTenant } = require('./middleware/auth');
-const { createRequestMetricsMiddleware, getHealthSnapshot } = require('./services/observability');
+const { getHealthSnapshot, getMetrics } = require('./services/observability');
+const { requestLogger } = require('./middleware/requestLogger');
+
+// Redis Client (centralized service)
+const { redis, isRedisEnabled } = require('./services/redisService');
+let limiterStore = undefined;
+
+if (isRedisEnabled) {
+    limiterStore = new RedisStore({
+        sendCommand: (...args) => redis.call(...args),
+    });
+}
 
 // Rate Limiting Global (IP based)
 const globalLimiter = rateLimit({
+    store: limiterStore,
     windowMs: 15 * 60 * 1000, // 15 minutos
     limit: 100, // Máximo 100 peticiones por ventana
     standardHeaders: 'draft-7',
@@ -47,30 +62,29 @@ const tenantLimiter = rateLimit({
 
 // Rate Limiting para endpoints sensibles (Auth/Connect) - RELAXED FOR TESTING
 app.use(globalLimiter);
-app.use(createRequestMetricsMiddleware());
+app.use(requestLogger);
 
-// --- SECURE CORS ---
+// --- SECURE CORS (PHASE 0) ---
 const allowedOrigins = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-    : null; // null means allow all in current stabilization phase
+    : [];
 
+// Auto-include common Render URLs if not explicitly set
+if (allowedOrigins.length === 0) {
+    allowedOrigins.push(
+        'https://whatsapp-fullstack-ylsx.onrender.com',
+        'https://whatsapp-fullstack-1-yjao.onrender.com',
+        'http://localhost:5173',
+        'http://localhost:3000'
+    );
+}
+
+// --- CORS CONFIGURATION (PERMISSIVE UNTIL STRICT LIST VALIDATED) ---
 app.use(cors({
-    origin: (origin, callback) => {
-        if (!allowedOrigins) {
-            // WARN level in production if origins not restricted
-            if (process.env.NODE_ENV === 'production') {
-                console.warn('⚠️ SEGURIDAD: ALLOWED_ORIGINS no está configurado. Permitiendo todos los orígenes por compatibilidad.');
-            }
-            return callback(null, true);
-        }
-        if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            console.error(`❌ CORS BLOCKED: Origin ${origin} not in allowlist:`, allowedOrigins);
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    credentials: true
+    origin: true,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
 }));
 
 // --- SECURITY HEADERS ---
@@ -87,23 +101,15 @@ app.use(helmet({
 // Middleware
 const jsonParser = express.json();
 
-// Stripe requiere body crudo para validar firma de webhook.
+// Stripe y TikTok requieren body crudo para validar firma de webhook (HMAC).
 app.use((req, res, next) => {
     if (req.path === '/api/payments/stripe/webhook') return next();
+    if (req.path === '/api/webhooks/tiktok') {
+        // TikTok HMAC necesita raw body — parseamos manualmente después
+        return express.raw({ type: '*/*' })(req, res, next);
+    }
     return jsonParser(req, res, next);
 });
-
-// Redis Client (Optional - for scaling to 5000+ users)
-let redis = null;
-if (process.env.REDIS_URL) {
-    try {
-        const Redis = require('ioredis');
-        redis = new Redis(process.env.REDIS_URL);
-        logger.info('✅ Redis connected for caching');
-    } catch (e) {
-        logger.warn('⚠️ Redis connection failed, using in-memory cache');
-    }
-}
 
 // In-Memory Cache Fallback
 const NodeCache = require('node-cache');
@@ -148,7 +154,7 @@ const sessionExchangeLimiter = rateLimit({
 
 // POST /api/auth/session-exchange
 // Exchange a Supabase access_token for a backend JWT
-app.post('/api/auth/session-exchange', sessionExchangeLimiter, async (req, res) => {
+app.post('/api/auth/session-exchange', sessionExchangeLimiter, jsonParser, async (req, res) => {
     const { access_token } = req.body;
     if (!access_token) return res.status(400).json({ error: 'Supabase access_token is required' });
 
@@ -171,8 +177,39 @@ app.post('/api/auth/session-exchange', sessionExchangeLimiter, async (req, res) 
     }
 });
 
-// Legacy login/register removed to enforce Supabase Auth.
-// Use Supabase Client SDK in frontend to login/signup.
+// POST /api/auth/register
+// Backend registration with auto-confirm to bypass Supabase email limits
+app.post('/api/auth/register', async (req, res) => {
+    const { email, password, role } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos' });
+
+    const { supabaseAdmin } = require('./services/supabaseClient');
+    if (!supabaseAdmin) {
+        return res.status(501).json({ error: 'El registro automático requiere SUPABASE_SERVICE_ROLE_KEY en el servidor. Usa registro normal.' });
+    }
+
+    try {
+        const { data, error } = await supabaseAdmin.auth.admin.createUser({
+            email,
+            password,
+            email_confirm: true,
+            user_metadata: { role: role || 'OWNER', plan: 'PRO' }
+        });
+
+        if (error) {
+            if (error.message.includes('already been registered')) {
+                return res.status(409).json({ error: 'El usuario ya existe. Usa Iniciar Sesión.' });
+            }
+            throw error;
+        }
+        res.json({ success: true, message: 'Usuario creado y confirmado automáticamente.', user: data.user });
+    } catch (err) {
+        console.error('Registration error:', err.message);
+        res.status(500).json({ error: 'Error al registrar usuario: ' + err.message });
+    }
+});
+
+// Legacy login removed to enforce Supabase Auth.
 app.post('/api/auth/login', (req, res) => {
     res.status(410).json({
         error: 'Este endpoint está obsoletos (AUTH_DEPRECATED). Use Supabase Auth + /api/auth/session-exchange.',
@@ -185,8 +222,16 @@ const path = require('path');
 const clientBuildPath = path.join(__dirname, '..', 'client', 'build');
 const clientDistPath = path.join(__dirname, '..', 'client', 'dist');
 const fs = require('fs');
-const frontendPath = fs.existsSync(clientBuildPath) ? clientBuildPath :
-    fs.existsSync(clientDistPath) ? clientDistPath : null;
+const getFrontendPath = () => {
+    const candidates = [clientBuildPath, clientDistPath];
+    for (const candidate of candidates) {
+        if (fs.existsSync(path.join(candidate, 'index.html'))) {
+            return candidate;
+        }
+    }
+    return null;
+};
+const frontendPath = getFrontendPath();
 
 if (frontendPath) {
     // index.html: never cache (ensures fresh version after deploy)
@@ -208,6 +253,11 @@ if (frontendPath) {
         }
     }));
 
+    // If an asset hash is stale/missing, return 404 (never fallback to index for JS/CSS assets)
+    app.get(/^\/assets\/.*$/, (req, res) => {
+        res.status(404).type('text/plain').send('Asset not found');
+    });
+
     logger.info(`📦 Frontend served from ${frontendPath} (cache-hardened)`);
 }
 
@@ -215,11 +265,17 @@ if (frontendPath) {
 app.get('/api/status', (req, res) => {
     res.json({
         status: 'online',
-        version: '2.0.5.0',
+        version: 'v2.0.8.0',
         platform: 'ALEX IO SAAS',
-        features: ['V6 Protocol Hardening', 'V8 Multi-Tenancy', 'TTS Voice'],
+        features: ['V6 Protocol Hardening', 'V8 Multi-Tenancy', 'TTS Voice', 'Sales Engine V5'],
         users: 'Optimized for scale'
     });
+});
+
+// AI Diagnostics Endpoint (shows which keys are configured/dead)
+app.get('/api/diagnostics/ai', (req, res) => {
+    const { getAiDiagnostics } = require('./services/alexBrain');
+    res.json(getAiDiagnostics());
 });
 
 app.get('/api/sre/health', authenticateTenant, (req, res) => {
@@ -228,6 +284,10 @@ app.get('/api/sre/health', authenticateTenant, (req, res) => {
     }
     return res.json({ success: true, health: getHealthSnapshot() });
 });
+
+// Multi-Platform Webhooks (Public endpoints for providers)
+const webhooksMulti = require('./routes/webhooks-multi');
+app.use('/api/webhooks', webhooksMulti);
 
 // WhatsApp Routes (Protected & Rate Limited by Tenant)
 const { router: whatsappSaas, restoreSessions } = require('./services/whatsappSaas');
@@ -238,6 +298,14 @@ app.use('/api/saas', authenticateTenant, tenantLimiter, whatsappSaas);
 const paymentsRouter = require('./routes/payments');
 app.use('/api/payments', authenticateTenant, tenantLimiter, paymentsRouter);
 
+// Long-Term Memory Routes
+const memoriesRouter = require('./routes/memories');
+app.use('/api/memories', authenticateTenant, tenantLimiter, memoriesRouter);
+
+// Leads and Advanced Broadcast Routes
+const leadsAndBroadcastRouter = require('./routes/leadsAndBroadcast');
+app.use('/api/saas', authenticateTenant, tenantLimiter, leadsAndBroadcastRouter);
+
 // Health Check (Public or Internal)
 app.get('/api/health', (req, res) => {
     res.json({
@@ -247,19 +315,41 @@ app.get('/api/health', (req, res) => {
     });
 });
 
+// Observability Metrics Endpoint (Phase 5)
+app.get('/api/metrics/:instance_id/:channel', authenticateTenant, (req, res) => {
+    const { instance_id, channel } = req.params;
+    const data = getMetrics(instance_id, channel);
+    if (!data) return res.status(404).json({ error: "No metrics" });
+    res.json(data);
+});
+
 // --- SPA CATCH-ALL (must be AFTER all API routes) ---
 if (frontendPath) {
-    app.get('*', (req, res) => {
+    app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/assets/')) {
+            return res.status(404).type('text/plain').send('Asset not found');
+        }
         res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.set('Pragma', 'no-cache');
         res.set('Expires', '0');
-        res.sendFile(path.join(frontendPath, 'index.html'));
+        return res.sendFile(path.join(frontendPath, 'index.html'), (err) => {
+            if (err) return next(err);
+        });
     });
 }
 
+
+app.use((err, req, res, next) => {
+    console.error('❌ Express unhandled error:', err.message, 'path:', req.path);
+    if (req.path.startsWith('/assets/')) {
+        return res.status(404).type('text/plain').send('Asset not found');
+    }
+    return res.status(500).json({ error: 'Internal server error' });
+});
+
 // --- START SERVER ---
 app.listen(PORT, () => {
-    logger.info(`🚀 ALEX IO SERVER V2 CORRIENDO EN PUERTO ${PORT}`);
+    logger.info(`🚀 ALEX IO SERVER V2 CORRIENDO EN ${HOST}:${PORT}`);
     logger.info(`📡 WhatsApp Handler Listo...`);
     logger.info(`🧠 AI Brain Listo...`);
 

@@ -1,10 +1,28 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Send, User, Bot, Clock, ShieldAlert, ZapOff, Zap } from 'lucide-react';
+import { Send, User, Bot, Clock, ShieldAlert, ZapOff, Zap, MessageCircle, Facebook, Instagram, Globe, Smartphone } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { fetchJsonWithApiFallback, getAuthHeaders } from '../api';
 
+const getPlatformIcon = (content, size = 14) => {
+    if (!content) return <MessageCircle size={size} />;
+    if (content.startsWith('[messenger]')) return <Facebook size={size} />;
+    if (content.startsWith('[instagram]')) return <Instagram size={size} />;
+    if (content.startsWith('[web]')) return <Globe size={size} />;
+    if (content.startsWith('[tiktok]')) return <Smartphone size={size} />;
+    return <MessageCircle size={size} />; // Default WhatsApp
+};
+
+const cleanContent = (content) => {
+    if (!content) return '';
+    if (content.startsWith('[')) {
+        return content.replace(/^\[(messenger|instagram|web|tiktok|whatsapp|AUDIO)\]\s*/i, '');
+    }
+    return content;
+};
+
 export default function LiveChat({ instanceId, tenantId }) {
     const [leads, setLeads] = useState([]);
+    const [leadsMeta, setLeadsMeta] = useState({});
     const [selectedLead, setSelectedLead] = useState(null);
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
@@ -38,6 +56,14 @@ export default function LiveChat({ instanceId, tenantId }) {
                     }
                 });
                 setLeads(Array.from(uniqueLeads.values()));
+            }
+
+            // Fetch AI intent metadata
+            const { data: metaData } = await supabase.from('leads').select('*').eq('instance_id', instanceId);
+            if (metaData) {
+                const metaMap = {};
+                metaData.forEach(m => metaMap[m.remote_jid] = m);
+                setLeadsMeta(metaMap);
             }
         };
 
@@ -91,7 +117,8 @@ export default function LiveChat({ instanceId, tenantId }) {
                 .order('created_at', { ascending: true })
                 .limit(100);
 
-            if (data && !error) setMessages(data);
+            if (!error && Array.isArray(data)) setMessages(data);
+            else if (!error) setMessages([]);
 
             // At this point we assume AI is active (not paused). 
             // In a deeper implementation, we'd fetch this from the backend or DB.
@@ -155,7 +182,7 @@ export default function LiveChat({ instanceId, tenantId }) {
     return (
         <div className="flex h-full bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
             {/* Sidebar Leads */}
-            <div className="w-1/3 border-r border-slate-700 flex flex-col bg-slate-900">
+            <div className="w-1/4 border-r border-slate-700 flex flex-col bg-slate-900">
                 <div className="p-4 border-b border-slate-700 bg-slate-950">
                     <h3 className="font-bold text-white flex items-center gap-2">
                         <Clock size={18} className="text-blue-500" /> Conversaciones
@@ -165,21 +192,36 @@ export default function LiveChat({ instanceId, tenantId }) {
                     {leads.length === 0 ? (
                         <p className="text-sm text-slate-500 p-4 text-center mt-10">Sin chats recientes</p>
                     ) : (
-                        leads.map(lead => (
-                            <button
-                                key={lead.jid}
-                                onClick={() => setSelectedLead(lead.jid)}
-                                className={`w-full text-left p-4 border-b border-slate-800 transition-colors ${selectedLead === lead.jid ? 'bg-blue-900/40 border-l-4 border-l-blue-500' : 'hover:bg-slate-800'}`}
-                            >
-                                <div className="font-mono text-xs text-slate-300 mb-1">{lead.jid.split('@')[0]}</div>
-                                <div className="text-xs text-slate-500 truncate">{lead.preview}</div>
-                            </button>
-                        ))
+                        leads.map(lead => {
+                            const meta = leadsMeta[lead.jid];
+                            const temp = meta?.temperature || 'COLD';
+                            
+                            const getTempBadge = (t) => {
+                                if (t === 'HOT') return <span className="bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded text-[9px] border border-red-500/50">🔥 HOT</span>;
+                                if (t === 'WARM') return <span className="bg-yellow-500/20 text-yellow-500 px-1.5 py-0.5 rounded text-[9px] border border-yellow-500/50">🟡 WARM</span>;
+                                return <span className="bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded text-[9px] border border-blue-500/50">❄️ COLD</span>;
+                            };
+
+                            return (
+                                <button
+                                    key={lead.jid}
+                                    onClick={() => setSelectedLead(lead.jid)}
+                                    className={`w-full text-left p-4 border-b border-slate-800 transition-colors ${selectedLead === lead.jid ? 'bg-blue-900/40 border-l-4 border-l-blue-500' : 'hover:bg-slate-800'}`}
+                                >
+                                    <div className="font-mono text-xs text-slate-300 mb-1 flex justify-between items-center">
+                                        <div className="flex items-center gap-2">
+                                            {getPlatformIcon(lead.preview, 14)}
+                                            {meta?.name !== 'desconocido' && meta?.name ? meta.name : lead.jid.split('@')[0]}
+                                        </div>
+                                        {meta && getTempBadge(temp)}
+                                    </div>
+                                    <div className="text-xs text-slate-500 truncate">{cleanContent(lead.preview)}</div>
+                                </button>
+                            );
+                        })
                     )}
                 </div>
             </div>
-
-            {/* Chat Window */}
             <div className="flex-1 flex flex-col bg-slate-950 relative">
                 {!selectedLead ? (
                     <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
@@ -189,14 +231,25 @@ export default function LiveChat({ instanceId, tenantId }) {
                 ) : (
                     <>
                         <div className="p-4 border-b border-slate-700 bg-slate-900 flex justify-between items-center">
-                            <span className="font-mono font-bold text-slate-200">{selectedLead.split('@')[0]}</span>
+                            <span className="font-mono font-bold text-slate-200 flex items-center gap-2">
+                                {getPlatformIcon(messages[0]?.content || '', 18)}
+                                {leadsMeta[selectedLead]?.name !== 'desconocido' && leadsMeta[selectedLead]?.name 
+                                    ? leadsMeta[selectedLead].name 
+                                    : selectedLead.split('@')[0]}
+                            </span>
+
+                            {leadsMeta[selectedLead]?.summary && (
+                                <div className="hidden lg:flex text-xs bg-slate-800 text-slate-400 px-3 py-1 rounded-full border border-slate-700 max-w-[200px] truncate" title={leadsMeta[selectedLead].summary}>
+                                    🤖 IA: {leadsMeta[selectedLead].summary}
+                                </div>
+                            )}
 
                             <button
                                 onClick={togglePauseBot}
                                 className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-bold transition-all ${isPaused ? 'bg-red-900/40 text-red-400 border border-red-800' : 'bg-emerald-900/40 text-emerald-400 border border-emerald-800'}`}
                             >
                                 {isPaused ? <ZapOff size={14} /> : <Zap size={14} />}
-                                {isPaused ? 'Bot Pausado (Control Manual)' : 'Bot IA Respondiendo'}
+                                {isPaused ? 'Bot Pausado' : 'IA Activa'}
                             </button>
                         </div>
 
@@ -206,7 +259,7 @@ export default function LiveChat({ instanceId, tenantId }) {
                                 return (
                                     <div key={msg.id || idx} className={`flex ${isUser ? 'justify-start' : 'justify-end'}`}>
                                         <div className={`max-w-[70%] rounded-xl p-3 text-sm flex flex-col ${isUser ? 'bg-slate-800 text-slate-200 rounded-tl-none' : 'bg-blue-600 text-white rounded-tr-none'}`}>
-                                            <span>{msg.content}</span>
+                                            <span>{cleanContent(msg.content)}</span>
                                             <span className={`text-[9px] mt-1 text-right ${isUser ? 'text-slate-500' : 'text-blue-300'}`}>
                                                 {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                                 {!isUser && msg.translation_model === 'none' && ' (Manual)'}
@@ -232,12 +285,86 @@ export default function LiveChat({ instanceId, tenantId }) {
                                 disabled={!input.trim() || sending}
                                 className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg px-4 transition-colors flex items-center justify-center gap-2 font-bold"
                             >
-                                <Send size={18} /> Enviar
+                                <Send size={18} />
                             </button>
                         </form>
                     </>
                 )}
             </div>
+
+            {/* Right Sidebar: Long-Term Memory */}
+            {selectedLead && (
+                <div className="w-1/4 border-l border-slate-700 bg-slate-900 flex flex-col overflow-hidden animate-in slide-in-from-right duration-300">
+                    <div className="p-4 border-b border-slate-700 bg-slate-950 flex items-center gap-2">
+                        <Zap size={16} className="text-amber-400" />
+                        <h3 className="font-bold text-xs text-white uppercase tracking-wider">Memoria del Cliente</h3>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                        <CustomerMemoryList customerId={selectedLead} />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+/**
+ * Componente interno para listar memorias del cliente actual
+ */
+function CustomerMemoryList({ customerId }) {
+    const [memories, setMemories] = useState([]);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (!customerId) return;
+        const fetchMemories = async () => {
+            setLoading(true);
+            try {
+                const { response, data } = await fetchJsonWithApiFallback(`/api/memories?customer_id=${customerId}`);
+                if (response.ok && Array.isArray(data)) {
+                    setMemories(data);
+                } else {
+                    setMemories([]);
+                }
+            } catch (e) {
+                console.error('Error fetching memories in LiveChat:', e);
+                setMemories([]);
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchMemories();
+    }, [customerId]);
+
+    if (loading) return <div className="text-[10px] text-slate-500 animate-pulse text-center mt-10">Cargando memoria semántica...</div>;
+
+    if (memories.length === 0) return <div className="text-[10px] text-slate-600 text-center italic mt-10">No hay hechos registrados para este cliente.</div>;
+
+    return (
+        <div className="space-y-3">
+            {memories.map(m => (
+                <div key={m.id} className="p-3 rounded-lg bg-white/5 border border-white/5 hover:border-amber-500/30 transition-all group">
+                    <div className="flex justify-between items-start mb-1">
+                        <span className={`text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
+                            m.category === 'preference' ? 'bg-purple-500/20 text-purple-400' :
+                            m.category === 'issue' ? 'bg-red-500/20 text-red-400' :
+                            'bg-amber-500/20 text-amber-400'
+                        }`}>
+                            {m.category}
+                        </span>
+                        <div className="flex gap-0.5">
+                            {[...Array(m.importance)].map((_, i) => (
+                                <div key={i} className="w-1 h-1 rounded-full bg-amber-500" />
+                            ))}
+                        </div>
+                    </div>
+                    <p className="text-[11px] text-slate-200 leading-relaxed">{m.content}</p>
+                    <div className="mt-2 text-[8px] text-slate-600 flex justify-between">
+                        <span>{m.source === 'auto' ? '🤖' : '👤'} {new Date(m.created_at).toLocaleDateString()}</span>
+                        <span className="opacity-0 group-hover:opacity-100 transition-opacity">#{m.access_count} usos</span>
+                    </div>
+                </div>
+            ))}
         </div>
     );
 }

@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Zap, MessageSquare, Clock, Shield, ChevronRight, ChevronLeft, Sparkles, Copy, Check, Play, HelpCircle, ExternalLink, Loader2, Volume2, Key, Globe, Users, BarChart3, Wifi, WifiOff, Star, ArrowRight } from 'lucide-react';
+import { Settings, Zap, MessageSquare, Clock, Shield, ChevronRight, ChevronLeft, Sparkles, Copy, Check, Play, HelpCircle, ExternalLink, Loader2, Volume2, Key, Globe, Users, BarChart3, Wifi, WifiOff, Star, ArrowRight, Facebook, Instagram, Music, Smartphone, Cloud, Eye, EyeOff } from 'lucide-react';
+
+const CONFIG_TAB_VERSION = 'v2.0.7.8-STABLE';
 
 // ─── Color Tokens (derived from parent theme or default dark) ─
 const makeTokens = (theme) => ({
@@ -24,13 +26,14 @@ const C = makeTokens(); // Global fallback tokens
 
 // ─── Business Type Cards ───────────────────────────────────────
 const BUSINESS_TYPES = [
-    { id: 'sales', icon: '🎯', title: 'Ventas Online', desc: 'E-commerce, catálogos, cierre de ventas', color: C.indigo, prompt: 'Eres un VENDEDOR EXPERTO altamente persuasivo para {businessName}. Tu meta es calificar al usuario, resolver objeciones y cerrar ventas. Sé dinámico, ofrece productos relevantes y guía al usuario hacia la compra.' },
-    { id: 'support', icon: '🎧', title: 'Soporte Técnico', desc: 'Tickets, troubleshooting, guías paso a paso', color: '#06b6d4', prompt: 'Eres un agente de SOPORTE TÉCNICO paciente y resolutivo de {businessName}. Solicita el número de ticket, diagnostica el problema y guía paso a paso al usuario hacia la solución.' },
-    { id: 'customer', icon: '💬', title: 'Atención al Cliente', desc: 'Consultas generales, FAQ, información', color: '#8b5cf6', prompt: 'Eres un asistente de ATENCIÓN AL CLIENTE amable y eficiente de {businessName}. Responde consultas generales, proporciona información sobre servicios y horarios, y escala a un humano cuando sea necesario.' },
-    { id: 'appointments', icon: '📅', title: 'Turnos & Reservas', desc: 'Agendamiento, confirmaciones, recordatorios', color: '#22c55e', prompt: 'Eres un asistente de AGENDAMIENTO de {businessName}. Tu trabajo es coordinar turnos y reservas. Pregunta por fecha, hora preferida y datos de contacto. Confirma la disponibilidad y envía recordatorios.' },
-    { id: 'restaurant', icon: '🍽️', title: 'Restaurante', desc: 'Menú, pedidos, delivery, reservas de mesa', color: '#f97316', prompt: 'Eres el asistente virtual de {businessName}. Ayudas a los clientes con el menú, tomas pedidos para delivery o retiro, gestionas reservas de mesa y respondes sobre horarios y ubicación.' },
+    { id: 'aesthetic', icon: '💎', title: 'Clínica de Estética', desc: 'Pre-calificación de pacientes, dudas de procedimientos, agendamiento', color: '#a855f7', prompt: 'Eres un Concierge Médico Experto de {businessName}. Tu objetivo es pre-calificar al paciente, responder dudas sobre procedimientos estéticos usando nuestra base de conocimiento, generar confianza y agendar una cita de valoración. NO das diagnósticos. Tono: Profesional, empático, clínico y persuasivo.' },
+    { id: 'dental', icon: '🦷', title: 'Odontología Premium', desc: 'Consultas, presupuestos, agendamiento de valoraciones', color: '#06b6d4', prompt: 'Eres el Asistente Dental Virtual de {businessName}. Pre-calificas al paciente, respondes dudas sobre tratamientos (ortodoncia, implantes, blanqueamiento) y agendas citas de valoración. Tono profesional, clínico y empático. No das diagnósticos por chat.' },
+    { id: 'realestate', icon: '🏠', title: 'Agencia Inmobiliaria', desc: 'Pre-calificación de compradores, propiedades, visitas', color: '#f59e0b', prompt: 'Eres un Agente de Pre-Venta Inmobiliario de {businessName}. Calificás al interesado (presupuesto, zona, tipo de propiedad), respondés consultas sobre disponibilidad y agendás visitas con un asesor. Tono profesional y orientado a la conversión.' },
+    { id: 'medconsult', icon: '🩺', title: 'Consultorio Médico', desc: 'Agendamiento, pre-consulta, derivaciones', color: '#22c55e', prompt: 'Eres el Asistente Virtual del consultorio {businessName}. Recibís consultas de pacientes, pre-filtras síntomas para aclarar la urgencia, agendas turnos y enviás recordatorios. Tono empático, profesional y tranquilizador. Derivás a urgencias ante señales de alarma.' },
+    { id: 'professional', icon: '⚖️', title: 'Servicios Profesionales', desc: 'Abogados, contadores, asesores financieros', color: '#6366f1', prompt: 'Eres el Asistente Virtual de {businessName}. Pre-calificás consultas de clientes potenciales, respondés preguntas frecuentes sobre servicios y honorarios, y agendás una reunión de diagnóstico con el profesional a cargo. Tono formal, experto y confiable.' },
     { id: 'custom', icon: '⚙️', title: 'Personalizado', desc: 'Configura todo desde cero a tu medida', color: C.amber, prompt: '' },
 ];
+
 
 // ─── Wizard Questions ──────────────────────────────────────────
 const WIZARD_QUESTIONS = [
@@ -124,6 +127,9 @@ export default function ConfigTab({ selected, configDraft, setConfigDraft, onSav
     const [wizardData, setWizardData] = useState({});
     const [generatedPrompt, setGeneratedPrompt] = useState('');
     const [copied, setCopied] = useState(false);
+    const [copiedUrl, setCopiedUrl] = useState(false);
+    const [copiedToken, setCopiedToken] = useState(false);
+    const [showToken, setShowToken] = useState(false);
 
     // If bot already has a custom prompt, start in advanced mode
     useEffect(() => {
@@ -392,28 +398,247 @@ export default function ConfigTab({ selected, configDraft, setConfigDraft, onSav
 
                 {/* Channel Credentials */}
                 <div className="rounded-xl p-5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-                    <h3 className="font-bold text-sm mb-4 flex items-center gap-2" style={{ color: C.text }}>
-                        <Key size={16} style={{ color: C.amber }} /> Canal WhatsApp
-                    </h3>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Proveedor</label>
-                            <select className="w-full rounded-lg p-3 text-sm focus:outline-none appearance-none"
-                                style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
-                                value={configDraft.provider || 'baileys'} onChange={e => setConfigDraft(p => ({ ...p, provider: e.target.value }))}>
-                                <option value="baileys">Baileys (QR - Gratis)</option>
-                                <option value="meta">Meta Cloud API</option>
-                                <option value="360dialog">360Dialog</option>
-                            </select>
+                    <h3 className="font-bold text-sm mb-4 flex items-center justify-between gap-2" style={{ color: C.text }}>
+                        <div className="flex items-center gap-2">
+                            <Key size={16} style={{ color: C.amber }} /> Conexiones y Canales
                         </div>
-                        {configDraft.provider === 'meta' && (
-                            <div>
-                                <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Access Token</label>
-                                <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
-                                    style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
-                                    value={configDraft.accessToken || ''} onChange={e => setConfigDraft(p => ({ ...p, accessToken: e.target.value }))} placeholder="EAAxxxxxxx..." />
+                        <span className="text-[10px] opacity-30 font-mono">{CONFIG_TAB_VERSION}</span>
+                    </h3>
+                    <div className="space-y-6">
+                        <div className="space-y-3">
+                            <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider text-center" style={{ color: C.textDim }}>Selecciona tu Canal de Conexión</label>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                {[
+                                    { id: 'baileys', name: 'WhatsApp', sub: 'Baileys', icon: <Smartphone size={20} />, color: '#25D366' },
+                                    { id: 'meta', name: 'WhatsApp', sub: 'Cloud API', icon: <Cloud size={20} />, color: '#0080FF' },
+                                    { id: 'discord', name: 'Discord', sub: 'Bot API', icon: <MessageSquare size={20} />, color: '#5865F2' },
+                                    { id: 'tiktok', name: 'TikTok', sub: 'Business', icon: <Music size={20} />, color: '#000000' },
+                                    { id: 'messenger', name: 'Messenger', sub: 'Facebook', icon: <Facebook size={20} />, color: '#0695FF' },
+                                    { id: 'instagram', name: 'Instagram', sub: 'Direct', icon: <Instagram size={20} />, color: '#E4405F' },
+                                    { id: '360dialog', name: '360Dialog', sub: 'WhatsApp', icon: <Globe size={20} />, color: '#6366f1' },
+                                ].map(p => (
+                                    <button
+                                        key={p.id}
+                                        onClick={() => setConfigDraft(prev => ({ ...prev, provider: p.id }))}
+                                        className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all hover:scale-105 ${configDraft.provider === p.id ? 'shadow-lg border-indigo-500' : 'opacity-70 grayscale hover:grayscale-0'}`}
+                                        style={{ 
+                                            background: configDraft.provider === p.id ? `${C.indigo}15` : C.bg,
+                                            borderColor: configDraft.provider === p.id ? C.indigo : C.border,
+                                        }}
+                                    >
+                                        <div className="mb-2 p-2 rounded-lg" style={{ background: `${p.color}15`, color: p.color }}>{p.icon}</div>
+                                        <span className="text-[11px] font-bold" style={{ color: C.text }}>{p.name}</span>
+                                        <span className="text-[9px] uppercase opacity-50 font-bold tracking-wider">{p.sub}</span>
+                                    </button>
+                                ))}
                             </div>
-                        )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            {/* Conditional Discord Fields */}
+                            {configDraft.provider === 'discord' && (
+                                <div className="sm:col-span-2">
+                                    <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Discord Bot Token</label>
+                                    <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                        style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                        value={configDraft.discordToken || ''} onChange={e => setConfigDraft(p => ({ ...p, discordToken: e.target.value }))} placeholder="MTEyN..." />
+                                </div>
+                            )}
+
+                            {/* Conditional Reddit Fields */}
+                            {configDraft.provider === 'reddit' && (
+                                <>
+                                    <div>
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Reddit Client ID</label>
+                                        <input className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.redditClientId || ''} onChange={e => setConfigDraft(p => ({ ...p, redditClientId: e.target.value }))} placeholder="Client ID..." />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Reddit Client Secret</label>
+                                        <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.redditClientSecret || ''} onChange={e => setConfigDraft(p => ({ ...p, redditClientSecret: e.target.value }))} placeholder="Secret..." />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Reddit Username</label>
+                                        <input className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.redditUsername || ''} onChange={e => setConfigDraft(p => ({ ...p, redditUsername: e.target.value }))} placeholder="u/alexbot..." />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Reddit Password</label>
+                                        <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.redditPassword || ''} onChange={e => setConfigDraft(p => ({ ...p, redditPassword: e.target.value }))} placeholder="Password..." />
+                                    </div>
+                                </>
+                            )}
+                            
+                            {/* Conditional Meta/WA Fields */}
+                            {configDraft.provider === 'meta' && (
+                                <>
+                                    <div>
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>WA Phone Number ID</label>
+                                        <input className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.phoneNumberId || ''} onChange={e => setConfigDraft(p => ({ ...p, phoneNumberId: e.target.value }))} placeholder="123456789..." />
+                                    </div>
+                                    <div className="sm:col-span-2">
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>WA Cloud Access Token</label>
+                                        <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.accessToken || ''} onChange={e => setConfigDraft(p => ({ ...p, accessToken: e.target.value }))} placeholder="EAAxxxxxxx..." />
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Conditional Messenger/IG Fields */}
+                            {(configDraft.provider === 'messenger' || configDraft.provider === 'instagram') && (
+                                <div className="sm:col-span-2">
+                                    <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Page/Account Access Token</label>
+                                    <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                        style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                        value={configDraft.accessToken || ''} onChange={e => setConfigDraft(p => ({ ...p, accessToken: e.target.value }))} placeholder="EAAxxxxxxx..." />
+                                </div>
+                            )}
+
+                            {/* Conditional TikTok Fields */}
+                            {configDraft.provider === 'tiktok' && (
+                                <>
+                                    <div>
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>TikTok Seller ID</label>
+                                        <input className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.tiktokSellerId || ''} onChange={e => setConfigDraft(p => ({ ...p, tiktokSellerId: e.target.value }))} placeholder="Seller ID..." />
+                                    </div>
+                                    <div className="sm:col-span-2">
+                                        <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>TikTok Access Token</label>
+                                        <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none"
+                                            style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                            value={configDraft.tiktokAccessToken || ''} onChange={e => setConfigDraft(p => ({ ...p, tiktokAccessToken: e.target.value }))} placeholder="Actxxxxxxx..." />
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* ManyChat Bridge (Always visible as it can complement any channel) */}
+                        <div className="mt-4 pt-4 border-t" style={{ borderColor: C.border }}>
+                            <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider flex items-center gap-1" style={{ color: C.textDim }}>
+                                <Zap size={14} className="text-indigo-400" /> Puente ManyChat / External Webhook
+                            </label>
+                            <p className="text-[10px] mb-2" style={{ color: C.textMuted }}>
+                                Configura la **External Request** en ManyChat usando este Request URL y el Token:
+                            </p>
+                            
+                            <div className="relative group mb-3">
+                                <div className="p-2.5 rounded-lg bg-black/20 border border-indigo-500/10 font-mono text-[9px] break-all pr-12" 
+                                     style={{ color: C.indigo }}>
+                                    {window.location.origin}/api/webhooks/manychat?tenantId={selected?.tenantId || selected?.tenant_id || configDraft.tenantId || 'TU_TENANT_ID'}&instanceId={selected?.instanceId || selected?.id}
+                                </div>
+                                <button 
+                                    onClick={() => {
+                                        const url = `${window.location.origin}/api/webhooks/manychat?tenantId=${selected?.tenantId || selected?.tenant_id || configDraft.tenantId || 'TU_TENANT_ID'}&instanceId=${selected?.instanceId || selected?.id}`;
+                                        navigator.clipboard.writeText(url);
+                                        setCopiedUrl(true);
+                                        setTimeout(() => setCopiedUrl(false), 2000);
+                                    }}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition-all hover:bg-white/10"
+                                    style={{ color: copiedUrl ? C.green : C.indigo }}
+                                    title="Copiar URL"
+                                >
+                                    {copiedUrl ? <Check size={14} /> : <Copy size={14} />}
+                                </button>
+                            </div>
+
+                            <div className="flex gap-2">
+                                <div className="relative flex-1">
+                                    <input type={showToken ? "text" : "password"} className="w-full rounded-lg p-3 text-sm focus:outline-none transition-colors pr-20"
+                                        style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                        value={configDraft.manychatToken || ''} 
+                                        onChange={e => setConfigDraft(p => ({ ...p, manychatToken: e.target.value }))} 
+                                        placeholder="Token secreto para Auth Header..." 
+                                    />
+                                    <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                                        <button 
+                                            onClick={() => setShowToken(!showToken)}
+                                            className="p-1.5 rounded-md transition-all hover:bg-white/5"
+                                            style={{ color: C.textDim }}
+                                            title={showToken ? "Ocultar" : "Mostrar"}
+                                        >
+                                            {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                navigator.clipboard.writeText(configDraft.manychatToken || '');
+                                                setCopiedToken(true);
+                                                setTimeout(() => setCopiedToken(false), 2000);
+                                            }}
+                                            className="p-1.5 rounded-md transition-all hover:bg-white/5"
+                                            style={{ color: copiedToken ? C.green : C.textDim }}
+                                            title="Copiar Token"
+                                        >
+                                            {copiedToken ? <Check size={14} /> : <Copy size={14} />}
+                                        </button>
+                                    </div>
+                                </div>
+                                <button onClick={() => {
+                                    const newToken = 'ALEX_' + Math.random().toString(36).substr(2, 10).toUpperCase();
+                                    setConfigDraft(p => ({ ...p, manychatToken: newToken }));
+                                    setShowToken(true);
+                                }}
+                                    className="px-3 rounded-lg font-bold text-xs transition-all hover:scale-105"
+                                    style={{ background: C.indigoDim, color: C.indigo, border: `1px solid ${C.indigo}44` }}>
+                                    <Sparkles size={14} className="inline mr-1" /> Generar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* CRM Integrations */}
+                <div className="rounded-xl p-5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+                    <h3 className="font-bold text-sm mb-4 flex items-center gap-2" style={{ color: C.text }}>
+                        <Users size={16} style={{ color: C.green }} /> Integraciones CRM
+                    </h3>
+                    <div className="space-y-4">
+                        {/* HubSpot */}
+                        <div>
+                            <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>HubSpot - Private App Token</label>
+                            <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none transition-colors"
+                                style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                onFocus={e => e.target.style.borderColor = C.indigo}
+                                onBlur={e => e.target.style.borderColor = C.border}
+                                value={configDraft.hubspotAccessToken || ''} onChange={e => setConfigDraft(p => ({ ...p, hubspotAccessToken: e.target.value }))} placeholder="pat-na1-xxxx-xxxx..." />
+                        </div>
+                        {/* GoHighLevel */}
+                        <div>
+                            <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>GoHighLevel - API Key (v2)</label>
+                            <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none transition-colors"
+                                style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                onFocus={e => e.target.style.borderColor = C.indigo}
+                                onBlur={e => e.target.style.borderColor = C.border}
+                                value={configDraft.ghlApiKey || ''} onChange={e => setConfigDraft(p => ({ ...p, ghlApiKey: e.target.value }))} placeholder="pit-xxxx..." />
+                        </div>
+                        {/* Copper */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Copper - API Key</label>
+                                <input type="password" className="w-full rounded-lg p-3 text-sm focus:outline-none transition-colors"
+                                    style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                    onFocus={e => e.target.style.borderColor = C.indigo}
+                                    onBlur={e => e.target.style.borderColor = C.border}
+                                    value={configDraft.copperApiKey || ''} onChange={e => setConfigDraft(p => ({ ...p, copperApiKey: e.target.value }))} placeholder="xxxx-xxxx-xxxx" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold mb-1.5 uppercase tracking-wider" style={{ color: C.textDim }}>Copper - User Email</label>
+                                <input type="email" className="w-full rounded-lg p-3 text-sm focus:outline-none transition-colors"
+                                    style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text }}
+                                    onFocus={e => e.target.style.borderColor = C.indigo}
+                                    onBlur={e => e.target.style.borderColor = C.border}
+                                    value={configDraft.copperUserEmail || ''} onChange={e => setConfigDraft(p => ({ ...p, copperUserEmail: e.target.value }))} placeholder="user@company.com" />
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -422,6 +647,23 @@ export default function ConfigTab({ selected, configDraft, setConfigDraft, onSav
                     className="w-full py-3.5 rounded-xl font-bold text-sm transition-all hover:scale-[1.01] hover:shadow-lg"
                     style={{ background: `linear-gradient(135deg, ${C.indigo}, #7c3aed)`, color: '#fff', boxShadow: `0 4px 20px ${C.indigo}44` }}>
                     💾 Guardar Configuración
+                </button>
+
+                <button onClick={async () => {
+                    try {
+                        const { response, data } = await fetchJsonWithApiFallback(`/api/saas/test-sync/${instanceId}`, {
+                            method: 'POST',
+                            headers: { ...getAuthHeaders() }
+                        });
+                        if (response.ok) pushNotice('success', data.message);
+                        else throw new Error(data.error);
+                    } catch (e) {
+                         pushNotice('error', e.message);
+                    }
+                }}
+                    className="w-full py-2.5 rounded-xl font-bold text-xs transition-all opacity-80 hover:opacity-100 mt-2"
+                    style={{ border: `1px dashed ${C.indigo}`, color: C.indigo }}>
+                    🧪 Test HubSpot (SRE)
                 </button>
                 <SupportBanner text="¿Dudas sobre la configuración avanzada?" />
             </div>
@@ -455,9 +697,22 @@ export default function ConfigTab({ selected, configDraft, setConfigDraft, onSav
                     </div>
                 </div>
 
-                {/* Analytics */}
                 <div className="rounded-xl p-5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
                     <h4 className="text-xs font-bold uppercase tracking-wider mb-4" style={{ color: C.textDim }}>Analítica (7 días)</h4>
+
+                    {/* Channel Distribution */}
+                    {analytics?.channels && (
+                        <div className="mb-4 pb-4 border-b" style={{ borderColor: C.border }}>
+                           <h5 className="text-[10px] uppercase font-bold mb-2 flex items-center gap-1" style={{ color: C.textMuted }}><BarChart3 size={12}/> Uso por Canal</h5>
+                           <div className="grid grid-cols-2 gap-2">
+                                <div className="text-xs flex justify-between"><span className="flex items-center gap-1 text-green-400"><MessageSquare size={12}/> WA</span> <span className="font-bold" style={{ color: C.text }}>{analytics.channels.whatsapp || 0}</span></div>
+                                <div className="text-xs flex justify-between"><span className="flex items-center gap-1 text-blue-400"><Facebook size={12}/> FB</span> <span className="font-bold" style={{ color: C.text }}>{analytics.channels.messenger || 0}</span></div>
+                                <div className="text-xs flex justify-between"><span className="flex items-center gap-1 text-pink-400"><Instagram size={12}/> IG</span> <span className="font-bold" style={{ color: C.text }}>{analytics.channels.instagram || 0}</span></div>
+                                <div className="text-xs flex justify-between"><span className="flex items-center gap-1 text-slate-400"><Globe size={12}/> Web</span> <span className="font-bold" style={{ color: C.text }}>{analytics.channels.web || 0}</span></div>
+                           </div>
+                        </div>
+                    )}
+
                     <div className="space-y-4">
                         {[
                             { label: 'Mensajes recibidos', value: analytics?.messages_received || 0, icon: <MessageSquare size={14} />, color: C.indigo },

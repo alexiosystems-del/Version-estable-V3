@@ -12,14 +12,13 @@ export default function Login() {
     const [isSignUp, setIsSignUp] = useState(false);
     const [rememberSession, setRememberSession] = useState(true);
     const [message, setMessage] = useState('');
-    const [messageType, setMessageType] = useState('error'); // 'error' | 'success'
+    const [messageType, setMessageType] = useState('error');
 
     const showMsg = (text, type = 'error') => {
         setMessage(text);
         setMessageType(type);
     };
 
-    // ── Google OAuth ──────────────────────────────────────────────────────────
     const handleGoogleLogin = async () => {
         if (!supabase) {
             showMsg('Supabase no está configurado correctamente.');
@@ -39,7 +38,6 @@ export default function Login() {
         }
     };
 
-    // ── Email / Password ──────────────────────────────────────────────────────
     const handleAuth = async (e) => {
         e.preventDefault();
         if (!supabase) {
@@ -54,58 +52,60 @@ export default function Login() {
 
         try {
             if (isSignUp) {
-                // REGISTRO — Supabase envía email de confirmación automáticamente
-                const { error } = await supabase.auth.signUp({
-                    email,
-                    password,
-                    options: {
-                        emailRedirectTo: window.location.origin + '/#/login'
+                const normalizedEmail = email.trim().toLowerCase();
+                try {
+                    const { fetchJsonWithApiFallback } = await import('../api.js');
+                    const { response } = await fetchJsonWithApiFallback('/api/auth/register', {
+                        method: 'POST',
+                        body: JSON.stringify({ email: normalizedEmail, password })
+                    });
+                    if (response.ok) {
+                        showMsg('✅ ¡Cuenta creada exitosamente! Ingresá tu contraseña para iniciar sesión.', 'success');
+                        setIsSignUp(false);
+                        return;
                     }
+                } catch (beErr) {
+                    console.warn('[Registration] Backend error:', beErr.message);
+                    if (!beErr.message.includes('requiere SUPABASE_SERVICE_ROLE_KEY')) {
+                        // Error de red u otro error fatal, pero permitimos fallback a Supabase si es posible
+                    }
+                }
+                const { error } = await supabase.auth.signUp({
+                    email: normalizedEmail,
+                    password,
+                    options: { emailRedirectTo: window.location.origin + '/#/login' }
                 });
                 if (error) throw error;
-                showMsg(
-                    '✅ ¡Cuenta creada! Revisá tu casilla de email para confirmar tu cuenta y luego podrás iniciar sesión.',
-                    'success'
-                );
+                showMsg('✅ ¡Cuenta creada! Revisá tu casilla de email para confirmar tu cuenta.', 'success');
             } else {
-                // LOGIN — Email + contraseña via Supabase (valida credenciales nativamente)
                 const normalizedEmail = email.trim().toLowerCase();
                 const { data, error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
                 if (error) throw error;
+                if (!data.session) throw new Error('No se pudo establecer sesión con Supabase.');
 
-                if (!data.session) {
-                    throw new Error('No se pudo establecer sesión con Supabase.');
-                }
-
-                // Obtener JWT del backend mediante intercambio de token de Supabase
                 let backendToken = null;
                 let backendRole = data.user?.user_metadata?.role || 'OWNER';
                 let backendTenant = data.user?.id;
 
                 try {
-                    const { getPreferredApiBase } = await import('../api.js');
-                    const apiBase = getPreferredApiBase();
-                    const resp = await fetch(`${apiBase}/api/auth/session-exchange`, {
+                    const { fetchJsonWithApiFallback } = await import('../api.js');
+                    const { data: backendData } = await fetchJsonWithApiFallback('/api/auth/session-exchange', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ access_token: data.session.access_token })
                     });
-
-                    if (resp.ok) {
-                        const backendData = await resp.json();
+                    
+                    if (backendData.token) {
                         backendToken = backendData.token;
                         backendRole = backendData.role || backendRole;
                         backendTenant = backendData.tenantId || backendTenant;
                     } else {
-                        const errData = await resp.json();
-                        throw new Error(errData.error || 'Fallo en la validación del backend');
+                        throw new Error(`Detalle: ${JSON.stringify(backendData)}`);
                     }
                 } catch (backendErr) {
                     console.error('❌ Backend Session Error:', backendErr.message);
-                    throw backendErr; // Obligatorio para Enterprise: el backend debe validar la sesión
+                    throw new Error(`Error de sincronización: ${backendErr.message}`);
                 }
 
-                // Guardar solo el token firmado por nuestro backend (JWT_SECRET)
                 localStorage.setItem('alex_io_token', backendToken);
                 localStorage.setItem('demo_email', data.user.email);
                 localStorage.setItem('alex_io_role', backendRole);
@@ -120,7 +120,6 @@ export default function Login() {
             }
         } catch (error) {
             console.error('Auth Error:', error);
-            // Mensajes amigables en español
             const msg = error.message;
             if (msg.includes('Invalid login credentials')) {
                 showMsg('Email o contraseña incorrectos.');
@@ -139,27 +138,33 @@ export default function Login() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 relative overflow-hidden">
-            {/* Background Effects */}
-            <div className="absolute inset-0 pointer-events-none">
-                <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 rounded-full blur-[100px]"></div>
-                <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-cyan-600/10 rounded-full blur-[100px]"></div>
-            </div>
+        <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden" style={{ background: '#050510' }}>
+            {/* Animated Background */}
+            <div className="animated-bg" />
 
-            <div className="absolute top-6 left-6 z-10">
-                <Link to="/" className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors">
-                    <ArrowLeft size={20} /> Volver al inicio
+            {/* Floating Orbs */}
+            <div className="glass-orb" style={{ width: 500, height: 500, top: '-20%', left: '-10%', background: 'rgba(6, 182, 212, 0.1)' }} />
+            <div className="glass-orb" style={{ width: 400, height: 400, bottom: '-15%', right: '-10%', background: 'rgba(139, 92, 246, 0.1)', animationDelay: '-7s' }} />
+            <div className="glass-orb" style={{ width: 200, height: 200, top: '60%', left: '60%', background: 'rgba(236, 72, 153, 0.06)', animationDelay: '-3s' }} />
+
+            {/* Back Link */}
+            <div className="absolute top-6 left-6 z-20">
+                <Link to="/" className="flex items-center gap-2 text-white/30 hover:text-white/70 transition-colors text-sm">
+                    <ArrowLeft size={18} /> Volver
                 </Link>
             </div>
 
+            {/* Login Card */}
             <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.5 }}
-                className="bg-slate-900/80 backdrop-blur-xl p-8 rounded-3xl shadow-2xl w-full max-w-md border border-slate-800 relative z-10"
+                initial={{ opacity: 0, y: 30, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
+                className="glass-card p-8 md:p-10 w-full max-w-md relative z-10"
+                style={{ '--glass-blur': '30px' }}
             >
-                <div className="flex justify-center mb-6">
-                    <div className="w-16 h-16 bg-cyan-600/20 rounded-2xl flex items-center justify-center border border-cyan-500/20">
+                {/* Logo */}
+                <div className="flex justify-center mb-7">
+                    <div className="w-16 h-16 rounded-2xl flex items-center justify-center shimmer-border" style={{ background: 'linear-gradient(135deg, rgba(6,182,212,0.15), rgba(139,92,246,0.15))' }}>
                         <Globe className="text-cyan-400 w-8 h-8" />
                     </div>
                 </div>
@@ -167,32 +172,32 @@ export default function Login() {
                 <h1 className="text-3xl font-bold text-white mb-2 text-center tracking-tight">
                     {isSignUp ? 'Crear Cuenta' : 'Bienvenido'}
                 </h1>
-                <p className="text-slate-500 text-sm text-center mb-6">
+                <p className="text-white/30 text-sm text-center mb-7">
                     {isSignUp ? 'Registrate para empezar' : 'Ingresá a tu cuenta'}
                 </p>
 
-                {/* LOGIN / SIGNUP TOGGLE */}
-                <div className="flex justify-center gap-1 mb-6 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                {/* Toggle Tabs */}
+                <div className="flex gap-1 mb-7 p-1 rounded-xl glass" style={{ background: 'rgba(255,255,255,0.02)' }}>
                     <button
                         onClick={() => { setIsSignUp(false); setMessage(''); }}
-                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${!isSignUp ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+                        className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${!isSignUp ? 'bg-white/10 text-white shadow-lg' : 'text-white/30 hover:text-white/60'}`}
                     >
                         Iniciar Sesión
                     </button>
                     <button
                         onClick={() => { setIsSignUp(true); setMessage(''); }}
-                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${isSignUp ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+                        className={`flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${isSignUp ? 'bg-white/10 text-white shadow-lg' : 'text-white/30 hover:text-white/60'}`}
                     >
                         Registrarse
                     </button>
                 </div>
 
-
-                {/* GOOGLE BUTTON */}
+                {/* Google Button */}
                 <button
                     onClick={handleGoogleLogin}
                     disabled={loading}
-                    className="w-full mb-4 py-3 bg-white text-slate-900 rounded-xl text-sm font-bold hover:bg-slate-100 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                    className="w-full mb-5 py-3 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2.5 disabled:opacity-50 hover:scale-[1.01] active:scale-[0.99]"
+                    style={{ background: 'rgba(255,255,255,0.95)', color: '#1a1a2e' }}
                 >
                     <svg className="w-5 h-5" viewBox="0 0 24 24">
                         <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
@@ -203,32 +208,32 @@ export default function Login() {
                     Continuar con Google
                 </button>
 
-                <div className="flex items-center gap-3 mb-4">
-                    <div className="flex-1 h-px bg-slate-800" />
-                    <span className="text-slate-600 text-xs">o con email</span>
-                    <div className="flex-1 h-px bg-slate-800" />
+                <div className="flex items-center gap-3 mb-5">
+                    <div className="flex-1 h-px" style={{ background: 'rgba(255,255,255,0.06)' }} />
+                    <span className="text-white/20 text-xs">o con email</span>
+                    <div className="flex-1 h-px" style={{ background: 'rgba(255,255,255,0.06)' }} />
                 </div>
 
-                {/* EMAIL FORM */}
+                {/* Email Form */}
                 <form onSubmit={handleAuth} className="space-y-4">
                     <div>
-                        <label className="block text-slate-400 text-xs font-bold mb-2 uppercase tracking-wider">Email</label>
+                        <label className="block text-white/40 text-xs font-bold mb-2 uppercase tracking-wider">Email</label>
                         <input
                             type="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all"
+                            className="w-full glass-input"
                             placeholder="tu@email.com"
                             required
                         />
                     </div>
                     <div>
-                        <label className="block text-slate-400 text-xs font-bold mb-2 uppercase tracking-wider">Contraseña</label>
+                        <label className="block text-white/40 text-xs font-bold mb-2 uppercase tracking-wider">Contraseña</label>
                         <input
                             type="password"
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 transition-all"
+                            className="w-full glass-input"
                             placeholder="••••••••"
                             required
                             minLength={6}
@@ -236,26 +241,31 @@ export default function Login() {
                     </div>
 
                     {message && (
-                        <div className={`p-4 rounded-xl text-sm flex items-start gap-2 ${messageType === 'success'
-                            ? 'bg-green-500/10 text-green-400 border border-green-500/20'
-                            : 'bg-red-500/10 text-red-400 border border-red-500/20'
-                            }`}>
+                        <motion.div
+                            initial={{ opacity: 0, y: -5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className={`p-4 rounded-xl text-sm flex items-start gap-2 glass ${messageType === 'success'
+                                ? 'text-emerald-300 border-emerald-500/20'
+                                : 'text-red-300 border-red-500/20'
+                            }`}
+                            style={{ background: messageType === 'success' ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)' }}
+                        >
                             {messageType === 'success' ? <Mail size={16} className="mt-0.5 shrink-0" /> : null}
                             <span>{message}</span>
-                        </div>
+                        </motion.div>
                     )}
 
                     <button
                         type="submit"
                         disabled={loading}
-                        className="w-full bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold py-3.5 rounded-xl shadow-lg transition-all transform hover:-translate-y-0.5 disabled:opacity-50 flex items-center justify-center gap-2"
+                        className="w-full glass-btn py-4 text-base flex items-center justify-center gap-2 disabled:opacity-50"
                     >
                         {loading && <Loader2 className="animate-spin" size={20} />}
                         <span>{isSignUp ? 'Crear Cuenta' : 'Entrar'}</span>
                     </button>
                 </form>
 
-                <div className="mt-6 text-center text-sm text-slate-500">
+                <div className="mt-7 text-center text-sm text-white/25">
                     {isSignUp ? '¿Ya tenés cuenta?' : '¿No tenés cuenta?'}
                     <button
                         onClick={() => { setIsSignUp(!isSignUp); setMessage(''); }}
